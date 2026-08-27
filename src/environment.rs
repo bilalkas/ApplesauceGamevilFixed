@@ -262,22 +262,29 @@ impl Environment {
         let startup_time = Instant::now();
         let launched_bundle_id = bundle.bundle_identifier().to_owned();
 
-        if launched_bundle_id == "at.source.potato.full" {
+        if matches!(
+            launched_bundle_id.as_str(),
+            "at.source.potato.full" | "com.gamevil.zenonia3" | "com.gamevil.zenonia3f2p"
+        ) {
             log!(
-        "Applying PotatoGold compatibility profile: disable present rotation, remap touch location to landscape, fake network success, and use silent OpenAL fallback."
+        "Applying compatibility profile: fake network success for {}.",
+        launched_bundle_id
     );
 
             // SAFETY: Environment::new runs during startup before guest worker threads
             // are created. These env vars are read by compatibility shims inside this
             // same process.
             unsafe {
-                std::env::set_var("TOUCHHLE_DISABLE_PRESENT_ROTATION", "1");
-                std::env::set_var("TOUCHHLE_TOUCH_LOCATION_PORTRAIT_TO_LANDSCAPE", "1");
                 std::env::set_var("TOUCHHLE_FAKE_NETWORK_SUCCESS", "1");
 
-                // PotatoGold's audio path was crashing on some Linux setups unless
-                // OpenAL Soft used the null backend. This keeps the app playable even
-                // if sound is silent.
+                if launched_bundle_id == "at.source.potato.full" {
+                    std::env::set_var("TOUCHHLE_DISABLE_PRESENT_ROTATION", "1");
+                    std::env::set_var("TOUCHHLE_TOUCH_LOCATION_PORTRAIT_TO_LANDSCAPE", "1");
+
+                    // PotatoGold's audio path was crashing on some Linux setups unless
+                    // OpenAL Soft used the null backend. This keeps the app playable even
+                    // if sound is silent.
+                }
             }
         }
         // Enforces the one (real) Environment limit. See `with_yielder` for
