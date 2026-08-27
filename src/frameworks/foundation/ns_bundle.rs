@@ -987,6 +987,30 @@ fn path_for_resource_helper(
         return nil;
     }
 
+    let name_str = ns_string::to_rust_string(env, name);
+    let lproj_str = if lproj == nil {
+        "<nil>".to_string()
+    } else {
+        ns_string::to_rust_string(env, lproj).into_owned()
+    };
+    let directory_str = if directory == nil {
+        "<nil>".to_string()
+    } else {
+        ns_string::to_rust_string(env, directory).into_owned()
+    };
+    let extension_str = if extension == nil {
+        "<nil>".to_string()
+    } else {
+        ns_string::to_rust_string(env, extension).into_owned()
+    };
+    log!(
+        "NSBundle lookup request: name={:?}, lproj={:?}, directory={:?}, extension={:?}",
+        name_str,
+        lproj_str,
+        directory_str,
+        extension_str
+    );
+
     let mut path: id = msg![env; bundle resourcePath];
     if lproj != nil {
         path = msg![env; path stringByAppendingPathComponent:lproj];
@@ -999,7 +1023,6 @@ fn path_for_resource_helper(
     // Если name = @"", мы ничего не приклеиваем.
     // path останется директорией ресурсов (напр. .../ZumaHD.app), что является
     // легальным путем.
-    let name_str = ns_string::to_rust_string(env, name);
     if name_str.is_empty() {
         // Empty-name compatibility shim for SexyAppBase-derived games such as
         // Plants vs. Zombies 1.x / Bejeweled 2 / Zuma's Revenge. Those games
