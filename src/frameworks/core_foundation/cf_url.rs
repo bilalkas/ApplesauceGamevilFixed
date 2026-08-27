@@ -10,7 +10,7 @@
 //! This is toll-free bridged to `NSURL` in Apple's implementation. Here it is
 //! the same type.
 use super::cf_allocator::{kCFAllocatorDefault, CFAllocatorRef};
-use super::{CFIndex, CFRelease, CFRetain};
+use super::{CFIndex, CFRelease, CFRetain, CFTypeRef};
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::frameworks::core_foundation::cf_string::{
     kCFStringEncodingUTF8, CFStringConvertEncodingToNSStringEncoding,
@@ -249,6 +249,51 @@ fn CFURLCreateWithString(
     } else {
         msg![env; url initWithString:url_string relativeToURL:base_url]
     }
+}
+
+fn _CFURLCreatePropertyFromResource(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    url: CFURLRef,
+    property: CFStringRef,
+    error_code: MutPtr<i32>,
+) -> CFTypeRef {
+    if !validate_allocator(env, allocator) || url.is_null() || property.is_null() {
+        if !error_code.is_null() {
+            env.mem.write(error_code, -1);
+        }
+        return nil;
+    }
+
+    let property_name = to_rust_string(env, property);
+    let value: id = match property_name.as_ref() {
+        "NSURLIsDirectoryKey" => {
+            let is_directory: bool = msg![env; url hasDirectoryPath];
+            msg_class![env; NSNumber numberWithBool:is_directory]
+        }
+        "NSURLIsRegularFileKey" => {
+            let is_directory: bool = msg![env; url hasDirectoryPath];
+            msg_class![env; NSNumber numberWithBool:(!is_directory)]
+        }
+        "NSURLPathKey" => msg![env; url path],
+        "NSURLNameKey" => {
+            let path: id = msg![env; url path];
+            msg![env; path lastPathComponent]
+        }
+        _ => nil,
+    };
+
+    if value.is_null() {
+        if !error_code.is_null() {
+            env.mem.write(error_code, -1);
+        }
+        return nil;
+    }
+
+    if !error_code.is_null() {
+        env.mem.write(error_code, 0);
+    }
+    retain(env, value)
 }
 
 fn CFURLCreateAbsoluteURLWithBytes(
@@ -1094,6 +1139,7 @@ pub const FUNCTIONS: FunctionExports = &[
     // Creation
     export_c_func!(CFURLCreateWithBytes(_, _, _, _, _)),
     export_c_func!(CFURLCreateWithString(_, _, _)),
+    export_c_func!(_CFURLCreatePropertyFromResource(_, _, _, _)),
     export_c_func!(CFURLCreateAbsoluteURLWithBytes(_, _, _, _, _, _)),
     export_c_func!(CFURLCreateWithFileSystemPath(_, _, _, _)),
     export_c_func!(CFURLCreateWithFileSystemPathRelativeToBase(_, _, _, _, _)),
