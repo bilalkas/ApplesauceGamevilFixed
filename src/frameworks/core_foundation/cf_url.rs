@@ -1139,7 +1139,7 @@ pub const FUNCTIONS: FunctionExports = &[
     // Creation
     export_c_func!(CFURLCreateWithBytes(_, _, _, _, _)),
     export_c_func!(CFURLCreateWithString(_, _, _)),
-    export_c_func!(_CFURLCreatePropertyFromResource(_, _, _, _)),
+    export_c_func!(_CFURLCreatePropertyFromResource(_, _, _, _, _)),
     export_c_func!(CFURLCreateAbsoluteURLWithBytes(_, _, _, _, _, _)),
     export_c_func!(CFURLCreateWithFileSystemPath(_, _, _, _)),
     export_c_func!(CFURLCreateWithFileSystemPathRelativeToBase(_, _, _, _, _)),
