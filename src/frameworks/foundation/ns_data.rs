@@ -188,6 +188,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         release(env, this);
         return nil;
     };
+    log!("NSData: Read file {:?} ({} bytes)", path_str, bytes.len());
     let size: NSUInteger = bytes.len().try_into().unwrap();
     if size == 0 {
         return this;
