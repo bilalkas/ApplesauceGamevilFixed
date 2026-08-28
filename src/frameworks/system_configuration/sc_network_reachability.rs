@@ -126,8 +126,12 @@ fn SCNetworkReachabilityGetFlags(
     _target: SCNetworkReachabilityRef,
     flags: MutPtr<SCNetworkReachabilityFlags>,
 ) -> bool {
-    // Принудительно говорим игре, что сеть доступна (Reachable)
-    env.mem.write(flags, kSCNetworkReachabilityFlagsReachable);
+    // Report a usable direct connection. Older games reject a target when
+    // reachability setup itself reports failure, even if the flags are set.
+    env.mem.write(
+        flags,
+        kSCNetworkReachabilityFlagsReachable | kSCNetworkReachabilityFlagsIsDirect,
+    );
     true
 }
 
@@ -142,7 +146,7 @@ fn SCNetworkReachabilitySetCallback(
         .borrow_mut::<SCNetworkReachabilityHostObject>(target);
     host.callout = Some(callout);
     host.context = context;
-    false
+    true
 }
 
 fn SCNetworkReachabilityScheduleWithRunLoop(
@@ -151,7 +155,7 @@ fn SCNetworkReachabilityScheduleWithRunLoop(
     _run_loop: CFTypeRef,
     _run_loop_mode: CFTypeRef,
 ) -> bool {
-    false
+    true
 }
 fn SCNetworkReachabilityUnscheduleFromRunLoop(
     _env: &mut Environment,
@@ -166,7 +170,7 @@ fn SCNetworkReachabilitySetDispatchQueue(
     _target: SCNetworkReachabilityRef,
     _queue: MutVoidPtr,
 ) -> bool {
-    false
+    true
 }
 
 pub const FUNCTIONS: FunctionExports = &[
