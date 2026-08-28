@@ -1214,10 +1214,19 @@ fn read_cstr_safe(env: &mut Environment, ptr: ConstPtr<u8>) -> String {
     if ptr.is_null() {
         return "(null)".to_string();
     }
+    // Some games pass garbage pointers into assert helpers while already in a
+    // fault path. Avoid probing low/null-page addresses and cap scans.
+    if ptr.to_bits() < 0x1000 {
+        return format!("(invalid:{:#x})", ptr.to_bits());
+    }
     // Read bytes until NUL terminator.
     let mut bytes = Vec::new();
     let mut offset = 0u32;
+    const MAX_CSTR_LEN: u32 = 1024;
     loop {
+        if offset >= MAX_CSTR_LEN {
+            break;
+        }
         let b: u8 = env.mem.read(ptr + offset);
         if b == 0 {
             break;
