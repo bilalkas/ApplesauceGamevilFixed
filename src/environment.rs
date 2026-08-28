@@ -311,8 +311,18 @@ impl Environment {
         let portrait_supported = bundle
             .supported_interface_orientations()
             .contains(&"UIInterfaceOrientationPortrait");
-        if options.initial_orientation == window::DeviceOrientation::Portrait && !portrait_supported
-        {
+        if bundle.bundle_identifier().starts_with("com.gamevil.") {
+            if matches!(
+                options.initial_orientation,
+                window::DeviceOrientation::Portrait | window::DeviceOrientation::PortraitUpsideDown
+            ) {
+                options.initial_orientation = window::DeviceOrientation::LandscapeLeft;
+                log!(
+                    "Applying landscape-only orientation policy for Gamevil bundle {}.",
+                    bundle.bundle_identifier()
+                );
+            }
+        } else if options.initial_orientation == window::DeviceOrientation::Portrait && !portrait_supported {
             if let Some(&non_portrait_orientation) = bundle
                 .supported_interface_orientations()
                 .iter()

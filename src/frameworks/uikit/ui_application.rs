@@ -171,6 +171,18 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())setStatusBarOrientation:(UIInterfaceOrientation)orientation {
+    if env.bundle.bundle_identifier().starts_with("com.gamevil.")
+        && matches!(
+            orientation,
+            UIDeviceOrientationPortrait | UIDeviceOrientationPortraitUpsideDown
+        )
+    {
+        log_dbg!(
+            "Ignoring portrait orientation request from landscape-only Gamevil app"
+        );
+        return;
+    }
+
     match orientation {
         UIDeviceOrientationUnknown => {
             // Per Apple docs UIDeviceOrientationUnknown (0) means the

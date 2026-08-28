@@ -147,6 +147,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())setOrientation:(UIDeviceOrientation)orientation {
+    if env.bundle.bundle_identifier().starts_with("com.gamevil.")
+        && matches!(
+            orientation,
+            UIDeviceOrientationPortrait | UIDeviceOrientationPortraitUpsideDown
+        )
+    {
+        log_dbg!("Ignoring portrait device orientation request from landscape-only Gamevil app");
+        return;
+    }
+
     env.window_mut().rotate_device(match orientation {
         UIDeviceOrientationPortrait      => DeviceOrientation::Portrait,
         UIDeviceOrientationPortraitUpsideDown => DeviceOrientation::PortraitUpsideDown,

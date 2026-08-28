@@ -146,11 +146,11 @@ private struct GameFile: Identifiable {
             || orientation == OrientationSetting.landscapeRight
         let isExplicitPortrait = orientation == OrientationSetting.portrait
 
-        // Zenonia 3 F2P declares portrait-only in its bundle but switches its
-        // OpenGL view to LandscapeLeft while launching.
-        if bundleIdentifier == "com.gamevil.zenonia3f2p"
-            && orientation == OrientationSetting.automatic {
-            return OrientationSetting.landscapeLeft
+        // Gamevil's legacy engines render through landscape OpenGL surfaces.
+        // Do not allow a saved portrait setting or an inaccurate Info.plist to
+        // start the host in a portrait geometry.
+        if bundleIdentifier?.hasPrefix("com.gamevil.") == true {
+            return isExplicitLandscape ? orientation : OrientationSetting.landscapeLeft
         }
 
         if supportsPortrait && !supportsLandscape {

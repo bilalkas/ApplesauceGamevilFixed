@@ -43,8 +43,10 @@ com.vgmobile.cnk2: --landscape-left --button-to-touch=A,240,160 --button-to-touc
 # Mystery Mania
 com.ea.mysterymania.inc: --landscape-left
 
-# Zenonia 3 F2P requests LandscapeLeft after launch. Starting in that
-# orientation avoids an iOS SDL fullscreen mode switch that can hide its view.
+# Zenonia 1 and Zenonia 3 F2P render only in landscape. Starting in that
+# orientation avoids a portrait presentation or iOS fullscreen mode switch
+# hiding their views.
+com.gamevil.Zenonia: --landscape-left
 com.gamevil.zenonia3f2p: --landscape-left
 
 # Fastlane Street Racing

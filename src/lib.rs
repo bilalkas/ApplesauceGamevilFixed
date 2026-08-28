@@ -354,6 +354,12 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             }
         }
     }
+
+    if app_id.starts_with("com.gamevil.") {
+        unsafe {
+            std::env::set_var("TOUCHHLE_PRESENT_STRETCH_TO_VIEWPORT", "1");
+        }
+    }
     // ULTRAHLE_POTATO_LANDSCAPE_END
 
     let minimum_os_version = bundle.minimum_os_version();

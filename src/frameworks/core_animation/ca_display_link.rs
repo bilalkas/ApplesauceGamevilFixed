@@ -38,9 +38,9 @@ use crate::objc::{
 struct CADisplayLinkHostObject {
     target: id,
     selector: Option<SEL>,
-    /// Weak reference. The timer retains the display link (as its target),
-    /// so the timer necessarily outlives the display link. After `invalidate`,
-    /// this pointer must not be used.
+    /// Weak reference to the timer while the display link is scheduled. Create
+    /// it only when adding the display link to a run loop: callers may configure
+    /// `frameInterval` before then, after the temporary autorelease pool drains.
     ns_timer: id,
     paused: bool,
     /// Number of frames between fires. Apple's CADisplayLink documentation
@@ -67,20 +67,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 + (id)displayLinkWithTarget:(id)target selector:(SEL)sel {
     let display_link: id = msg![env; this new];
-    // Because the timer will pass itself as a second arg in ns_timer::handle_timer,
-    // we need a re-direction: the timer fires on the display link, which then
-    // calls the original selector, passing the link as a second argument.
-    let redirect_sel: SEL = env.objc.lookup_selector("_touchHLE_displayLinkTimerDidFire:").unwrap();
-    let ns_timer = msg_class![env; NSTimer timerWithTimeInterval:(1.0/60.0)
-                     target:display_link
-                   selector:redirect_sel
-                   userInfo:nil
-                    repeats:true];
     retain(env, target);
     let host_object = env.objc.borrow_mut::<CADisplayLinkHostObject>(display_link);
     host_object.target = target;
     host_object.selector = Some(sel);
-    host_object.ns_timer = ns_timer;
     log_dbg!("[CADisplayLink displayLinkWithTarget:{:?} selector:{}] => {:?}", target, sel.as_str(&env.mem), display_link);
     autorelease(env, display_link)
 }
@@ -111,11 +101,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 // frameInterval are reflected here.
 // <https://developer.apple.com/documentation/quartzcore/cadisplaylink/1648422-duration>
 - (f64)duration {
-    let ns_timer = env.objc.borrow::<CADisplayLinkHostObject>(this).ns_timer;
-    if ns_timer == nil {
-        return 1.0 / 60.0;
-    }
-    msg![env; ns_timer timeInterval]
+    env.objc.borrow::<CADisplayLinkHostObject>(this).frame_interval as f64 / 60.0
 }
 
 // frameInterval: the number of display refreshes between notifications.
@@ -132,11 +118,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     // rather than raising NSInvalidArgumentException.
     let safe_interval = frameInterval.max(1);
     env.objc.borrow_mut::<CADisplayLinkHostObject>(this).frame_interval = safe_interval;
-    let interval = safe_interval as f64 / 60.0;
-
     let ns_timer = env.objc.borrow::<CADisplayLinkHostObject>(this).ns_timer;
     if ns_timer != nil {
-        set_time_interval(env, ns_timer, interval);
+        set_time_interval(env, ns_timer, safe_interval as f64 / 60.0);
     }
 }
 
@@ -159,10 +143,25 @@ pub const CLASSES: ClassExports = objc_classes! {
 // <https://developer.apple.com/documentation/quartzcore/cadisplaylink/add(to:formode:)>
 - (())addToRunLoop:(id)run_loop forMode:(NSRunLoopMode)mode {
     log_dbg!("[(CADisplayLink*){:?} addToRunLoop:{:?} forMode:{:?}]", this, run_loop, mode);
+    if run_loop == nil {
+        log!("Warning: [CADisplayLink addToRunLoop:nil forMode:] ignored");
+        return;
+    }
     let ns_timer = env.objc.borrow::<CADisplayLinkHostObject>(this).ns_timer;
     if ns_timer != nil {
         () = msg![env; run_loop addTimer:ns_timer forMode:mode];
+        return;
     }
+
+    let interval = env.objc.borrow::<CADisplayLinkHostObject>(this).frame_interval as f64 / 60.0;
+    let redirect_sel: SEL = env.objc.lookup_selector("_touchHLE_displayLinkTimerDidFire:").unwrap();
+    let ns_timer = msg_class![env; NSTimer timerWithTimeInterval:interval
+                     target:this
+                   selector:redirect_sel
+                   userInfo:nil
+                    repeats:true];
+    () = msg![env; run_loop addTimer:ns_timer forMode:mode];
+    env.objc.borrow_mut::<CADisplayLinkHostObject>(this).ns_timer = ns_timer;
 }
 
 // Removes the display link from a run loop in a specific mode.
@@ -180,6 +179,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let ns_timer = env.objc.borrow::<CADisplayLinkHostObject>(this).ns_timer;
     if ns_timer != nil && run_loop != nil {
         () = msg![env; ns_timer invalidate];
+        env.objc.borrow_mut::<CADisplayLinkHostObject>(this).ns_timer = nil;
     }
 }
 
@@ -189,7 +189,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())invalidate {
     log_dbg!("[(CADisplayLink*){:?} invalidate]", this);
     let ns_timer = env.objc.borrow::<CADisplayLinkHostObject>(this).ns_timer;
-    () = msg![env; ns_timer invalidate];
+    if ns_timer != nil {
+        env.objc.borrow_mut::<CADisplayLinkHostObject>(this).ns_timer = nil;
+        () = msg![env; ns_timer invalidate];
+    }
 }
 
 - (())dealloc {
