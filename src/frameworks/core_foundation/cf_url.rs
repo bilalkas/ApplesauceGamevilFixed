@@ -12,6 +12,7 @@
 use super::cf_allocator::{kCFAllocatorDefault, CFAllocatorRef};
 use super::{CFIndex, CFRelease, CFRetain, CFTypeRef};
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
+use crate::fs::GuestPath;
 use crate::frameworks::core_foundation::cf_string::{
     kCFStringEncodingUTF8, CFStringConvertEncodingToNSStringEncoding,
     CFStringEncoding, CFStringRef,
@@ -266,17 +267,40 @@ fn CFURLCreatePropertyFromResource(
     }
 
     let property_name = to_rust_string(env, property);
+    let path: id = msg![env; url path];
+    let path_string = if path.is_null() {
+        None
+    } else {
+        Some(to_rust_string(env, path).into_owned())
+    };
+
+    let (file_exists, is_directory, file_size) = if let Some(path_string) = path_string.as_deref() {
+        let guest_path = GuestPath::new(path_string);
+        let exists = env.fs.exists(guest_path);
+        let is_dir = exists && env.fs.is_dir(guest_path);
+        let size = if exists { env.fs.size(guest_path).ok() } else { None };
+        (exists, is_dir, size)
+    } else {
+        (false, false, None)
+    };
+
     let value: id = match property_name.as_ref() {
+        // Legacy CoreFoundation key names observed in older game ports.
+        "kCFURLFileExists" | "NSURLFileExistsKey" => {
+            msg_class![env; NSNumber numberWithBool:file_exists]
+        }
+        "kCFURLFileLength" | "kCFURLFileSize" | "NSURLFileSize" | "NSURLFileSizeKey" => {
+            let len = file_size.unwrap_or(0);
+            msg_class![env; NSNumber numberWithUnsignedLongLong:len]
+        }
         "NSURLIsDirectoryKey" => {
-            let is_directory: bool = msg![env; url hasDirectoryPath];
             msg_class![env; NSNumber numberWithBool:is_directory]
         }
         "NSURLIsRegularFileKey" => {
-            let is_directory: bool = msg![env; url hasDirectoryPath];
             msg_class![env; NSNumber numberWithBool:(!is_directory)]
         }
         "NSURLPathKey" => msg![env; url path],
-        "NSURLNameKey" => {
+        "NSURLNameKey" | "NSURLLocalizedNameKey" => {
             let path: id = msg![env; url path];
             msg![env; path lastPathComponent]
         }
@@ -1189,6 +1213,10 @@ pub const FUNCTIONS: FunctionExports = &[
 // that link with `-framework CoreFoundation` and reference (but don't call)
 // the keys can load.
 pub const CONSTANTS: ConstantExports = &[
+    (
+        "_kCFURLFileExists",
+        HostConstant::NSString("kCFURLFileExists"),
+    ),
     ("_kCFURLFileLength", HostConstant::NSString("NSURLFileSize")),
     ("_kCFURLFileSize", HostConstant::NSString("NSURLFileSize")),
     (
