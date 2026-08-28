@@ -1265,8 +1265,14 @@ pub const CONSTANTS: ConstantExports = &[
         "_kCFURLFileDirectoryContents",
         HostConstant::NSString("kCFURLFileDirectoryContents"),
     ),
-    ("_kCFURLFileLength", HostConstant::NSString("NSURLFileSize")),
-    ("_kCFURLFileSize", HostConstant::NSString("NSURLFileSize")),
+    (
+        "_kCFURLFileLength",
+        HostConstant::NSString("kCFURLFileLength"),
+    ),
+    (
+        "_kCFURLFileSize",
+        HostConstant::NSString("kCFURLFileSize"),
+    ),
     (
         "_kCFURLFileLastModificationTime",
         HostConstant::NSString("kCFURLFileLastModificationTime"),
