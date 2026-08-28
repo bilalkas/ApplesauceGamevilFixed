@@ -338,7 +338,8 @@ fn CTFontGetCapHeight(env: &mut Environment, font: CTFontRef) -> CGFloat {
     if ui_font == nil {
         return 0.0;
     }
-    msg![env; ui_font ascender] * 0.7
+    let ascender: CGFloat = msg![env; ui_font ascender];
+    ascender * 0.7
 }
 
 fn CTFontGetXHeight(env: &mut Environment, font: CTFontRef) -> CGFloat {
@@ -349,7 +350,8 @@ fn CTFontGetXHeight(env: &mut Environment, font: CTFontRef) -> CGFloat {
     if ui_font == nil {
         return 0.0;
     }
-    msg![env; ui_font pointSize] * 0.5
+    let point_size: CGFloat = msg![env; ui_font pointSize];
+    point_size * 0.5
 }
 
 fn CTFontGetUnderlinePosition(env: &mut Environment, font: CTFontRef) -> CGFloat {
@@ -360,7 +362,8 @@ fn CTFontGetUnderlinePosition(env: &mut Environment, font: CTFontRef) -> CGFloat
     if ui_font == nil {
         return 0.0;
     }
-    -(msg![env; ui_font pointSize] * 0.1)
+    let point_size: CGFloat = msg![env; ui_font pointSize];
+    -(point_size * 0.1)
 }
 
 fn CTFontCreateForString(
