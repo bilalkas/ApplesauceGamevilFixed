@@ -1878,11 +1878,21 @@ impl Window {
             }
             if let Err(err) = self.window.set_fullscreen(sdl2::video::FullscreenType::True) {
                 log!(
-                    "Warning: couldn't return to fullscreen after rotating to {:?}: {}. \
-                     The host UI may not permit this orientation.",
+                    "Warning: couldn't return to strict fullscreen after rotating to {:?}: {}. \
+                     Falling back to desktop fullscreen.",
                     new_orientation,
                     err
                 );
+                if let Err(fallback_err) = self
+                    .window
+                    .set_fullscreen(sdl2::video::FullscreenType::Desktop)
+                {
+                    log!(
+                        "Warning: couldn't enter desktop fullscreen after rotating to {:?}: {}",
+                        new_orientation,
+                        fallback_err
+                    );
+                }
             }
         }
 

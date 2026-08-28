@@ -43,6 +43,10 @@ com.vgmobile.cnk2: --landscape-left --button-to-touch=A,240,160 --button-to-touc
 # Mystery Mania
 com.ea.mysterymania.inc: --landscape-left
 
+# Zenonia 3 F2P requests LandscapeLeft after launch. Starting in that
+# orientation avoids an iOS SDL fullscreen mode switch that can hide its view.
+com.gamevil.zenonia3f2p: --landscape-left
+
 # Fastlane Street Racing
 # A = accelerate, B = brake, X = Camera, Start = Pause
 com.atodab.actane: --landscape-left --button-to-touch=A,430,300 --button-to-touch=B,30,300 --button-to-touch=X,15,15 --button-to-touch=Start,470,15
