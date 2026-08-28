@@ -296,16 +296,17 @@ fn CFURLCreatePropertyFromResource(
         "kCFURLFileDirectoryContents" => {
             if is_directory {
                 if let Some(path_string) = path_string.as_deref() {
-                    if let Ok(entries) = env.fs.enumerate(GuestPath::new(path_string)) {
-                        let arr: id = msg_class![env; NSMutableArray array];
-                        for entry in entries {
-                            let s = from_rust_string(env, entry.to_string());
-                            let _: () = msg![env; arr addObject:s];
-                        }
-                        arr
-                    } else {
-                        msg_class![env; NSArray array]
+                    let entries: Vec<String> = env
+                        .fs
+                        .enumerate(GuestPath::new(path_string))
+                        .map(|entries| entries.map(str::to_string).collect())
+                        .unwrap_or_default();
+                    let arr: id = msg_class![env; NSMutableArray array];
+                    for entry in entries {
+                        let s = from_rust_string(env, entry);
+                        let _: () = msg![env; arr addObject:s];
                     }
+                    arr
                 } else {
                     msg_class![env; NSArray array]
                 }
