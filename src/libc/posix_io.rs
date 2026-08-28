@@ -474,7 +474,7 @@ pub fn read(
             let res = match e.kind() {
                 std::io::ErrorKind::IsADirectory => {
                     set_errno(env, EISDIR);
-                    -1
+                    0
                 }
                 _ => -1,
             };
