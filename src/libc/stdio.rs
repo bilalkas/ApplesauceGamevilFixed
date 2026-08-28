@@ -146,6 +146,11 @@ fn fopen(env: &mut Environment, filename: ConstPtr<u8>, mode: ConstPtr<u8>) -> M
         }
     };
 
+    let filename_str = env.mem.cstr_at_utf8(filename).unwrap_or_default();
+    if filename_str.to_ascii_lowercase().ends_with(".zt1") {
+        log!("fopen(): WIPI resource {:?} mode {:?}", filename_str, mode);
+    }
+
     match posix_io::open_direct(env, filename, flags) {
         -1 => Ptr::null(),
         fd => {
