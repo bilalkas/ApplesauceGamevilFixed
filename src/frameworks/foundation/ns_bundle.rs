@@ -1,9 +1,9 @@
 /*
-* This Source Code Form is subject to the terms of the Mozilla Public
-* License, v. 2.0.
-* If a copy of the MPL was not distributed with this
-* file, You can obtain one at https://mozilla.org/MPL/2.0/.
-*/
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0.
+ * If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
 //!
 //! `NSBundle`.
 use super::{ns_string, NSNotFound, NSRange, NSUInteger};
@@ -757,8 +757,8 @@ pub const CLASSES: ClassExports = objc_classes! {
             lproj_dir
         };
         let path: id = msg![env; this pathForResource:name
-                                             ofType:extension
-                                        inDirectory:effective_subpath];
+                                               ofType:extension
+                                          inDirectory:effective_subpath];
         if path != nil {
             let url: id = msg_class![env; NSURL alloc];
             let url: id = msg![env; url initFileURLWithPath:path];
@@ -857,7 +857,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         } else {
             // Else, load as standard format
             load_strings_as_standard_format(env, dict_url)
-        };
+        }
         if dict == nil {
             return if value == nil || value == empty_str { key } else { value };
         }
@@ -870,7 +870,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             .localization_tables
             .insert(name, dict);
         dict
-    };
+    }
     // 6. Final String Extraction
     let res: id = msg![env; dict objectForKey:key];
     if res == nil {
@@ -1028,11 +1028,17 @@ fn path_for_resource_helper(
         path = msg![env; path stringByAppendingPathComponent:directory];
     }
 
-    // Честное поведение iOS: никаких костылей для PvZ.
-    // Если name = @"", мы ничего не приклеиваем.
-    // path останется директорией ресурсов (напр. .../ZumaHD.app), что является
-    // легальным путем.
     if name_str.is_empty() {
+        // --- HACK FÜR ALLE GAMEVIL SPIELE ---
+        // Gamevil-Engines (Zenonia, Illusia etc.) geraten in eine Endlosschleife und crashen, 
+        // wenn sie bei leeren Dateinamen den Executable-Ordner zurückbekommen.
+        let bundle_id = env.bundle.bundle_identifier();
+        if bundle_id.starts_with("com.gamevil.") {
+            log_dbg!("Gamevil Hack: Blockiere leeren Dateinamen (name=\"\"), gebe nil zurück.");
+            return nil;
+        }
+        // ------------------------------------
+
         // Empty-name compatibility shim for SexyAppBase-derived games such as
         // Plants vs. Zombies 1.x / Bejeweled 2 / Zuma's Revenge. Those games
         // call `[[NSBundle mainBundle] pathForResource:@"" ofType:nil]` and

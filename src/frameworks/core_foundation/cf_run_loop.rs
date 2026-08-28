@@ -40,19 +40,6 @@ pub struct CFRunLoopTimerContext {
 
 unsafe impl SafeRead for CFRunLoopTimerContext {}
 
-// Наш внутренний объект для хранения таймера в памяти эмулятора
-pub struct CFRunLoopTimerHostObject {
-    pub fire_date: f64,
-    pub interval: f64,
-    pub flags: u32,
-    pub order: i32,
-    pub context: CFRunLoopTimerContext,
-    pub callout: GuestFunction,
-    pub is_valid: bool,
-}
-
-impl HostObject for CFRunLoopTimerHostObject {}
-
 /// `CFRunLoopSourceContext` (version 0). Mirrors the public C declaration in
 /// `<CoreFoundation/CFRunLoop.h>`.
 #[repr(C, packed)]
@@ -524,60 +511,74 @@ fn CFRunLoopAddTimer(
     if rl.is_null() || timer.is_null() {
         return;
     }
-
-    // Как сказано в заголовке файла: в touchHLE CFRunLoop и NSRunLoop — это
-    // один и тот же тип.
-    // Поэтому мы честно пробрасываем вызов напрямую в NSRunLoop, который умеет
-    // работать с таймерами.
     let _: () = msg![env; rl addTimer:timer forMode:mode];
 }
 
 fn CFRunLoopRemoveTimer(
-    _env: &mut Environment,
-    _rl: CFRunLoopRef,
-    _timer: CFRunLoopTimerRef,
+    env: &mut Environment,
+    rl: CFRunLoopRef,
+    timer: CFRunLoopTimerRef,
     _mode: CFRunLoopMode,
 ) {
-    log!("CFRunLoopRemoveTimer: stubbed");
+    if !rl.is_null() && !timer.is_null() {
+        let _: () = msg![env; timer invalidate];
+    }
 }
 
 fn CFRunLoopTimerCreate(
     env: &mut Environment,
-    _allocator: id,
+    allocator: CFAllocatorRef,
     fire_date: f64,
     interval: f64,
     flags: u32,
     order: i32,
-    context_ptr: ConstPtr<CFRunLoopTimerContext>,
     callout: GuestFunction,
+    context_ptr: ConstPtr<CFRunLoopTimerContext>,
 ) -> CFRunLoopTimerRef {
-    // 1. Честно считываем контекст из памяти гостя, если он передан
-    let context = if !context_ptr.is_null() {
-        env.mem.read(context_ptr)
+    if !(allocator == kCFAllocatorDefault || env.mem.read(allocator).is_system_default()) {
+        log!("CFRunLoopTimerCreate: non-default allocator unsupported");
+        return nil;
+    }
+    if flags != 0 || order != 0 {
+        log!(
+            "CFRunLoopTimerCreate: unsupported flags ({flags}) or order ({order})"
+        );
+        return nil;
+    }
+
+    let info = if context_ptr.is_null() {
+        MutVoidPtr::null()
     } else {
-        // Если игра передала NULL, заполняем структуру нулями
-        unsafe { std::mem::zeroed() }
+        let context = env.mem.read(context_ptr);
+        if context.version != 0
+            || !context.retain.to_ptr().is_null()
+            || !context.release.to_ptr().is_null()
+            || !context.copyDescription.to_ptr().is_null()
+        {
+            log!("CFRunLoopTimerCreate: unsupported timer context");
+            return nil;
+        }
+        context.info
     };
 
-    // 2. Упаковываем все данные в наш HostObject
-    let host_object = CFRunLoopTimerHostObject {
-        fire_date,
-        interval,
-        flags,
-        order,
-        context,
-        callout,
-        is_valid: true, // Таймер активен при создании
-    };
+    let target: id = msg_class![env; _touchHLE_CFTimerTarget alloc];
+    let target: id = msg![env; target initWithCallout:callout info:info];
+    let selector = env.objc.lookup_selector("timerFireMethod:").unwrap();
+    let timer: id = msg_class![env; NSTimer timerWithTimeInterval:interval
+                                                   target:target
+                                                 selector:selector
+                                                 userInfo:nil
+                                                  repeats:(interval > 0.0)];
+    let _: () = msg![env; target release];
 
-    // 3. Выделяем реальный объект, чтобы игра не получила null.
-    // Используем базовый класс NSObject (или если в touchHLE есть NSTimer, то
-    // его)
-    let class = env.objc.get_known_class("NSObject", &mut env.mem);
-
-    // Возвращаем настоящий валидный указатель на созданный объект
-    env.objc
-        .alloc_object(class, Box::new(host_object), &mut env.mem)
+    // NSTimer's convenience constructor has no fire-date parameter. Match the
+    // requested first firing time after construction when it differs from now.
+    let current: f64 = msg_class![env; NSDate timeIntervalSinceReferenceDate];
+    if fire_date.is_finite() && fire_date > current {
+        let fire_date: id = msg_class![env; NSDate dateWithTimeIntervalSinceReferenceDate:fire_date];
+        let _: () = msg![env; timer setFireDate:fire_date];
+    }
+    timer
 }
 
 fn CFRunLoopTimerRetain(env: &mut Environment, timer: CFRunLoopTimerRef) -> CFRunLoopTimerRef {
@@ -594,35 +595,52 @@ fn CFRunLoopTimerRelease(env: &mut Environment, timer: CFRunLoopTimerRef) {
     }
 }
 
-fn CFRunLoopTimerIsValid(_env: &mut Environment, timer: CFRunLoopTimerRef) -> bool {
-    !timer.is_null()
+fn CFRunLoopTimerIsValid(env: &mut Environment, timer: CFRunLoopTimerRef) -> bool {
+    !timer.is_null() && msg![env; timer isValid]
 }
 
-fn CFRunLoopTimerInvalidate(_env: &mut Environment, _timer: CFRunLoopTimerRef) {
-    log_dbg!("CFRunLoopTimerInvalidate: stubbed");
+fn CFRunLoopTimerInvalidate(env: &mut Environment, timer: CFRunLoopTimerRef) {
+    if !timer.is_null() {
+        let _: () = msg![env; timer invalidate];
+    }
 }
 
 fn CFRunLoopTimerGetNextFireDate(
-    _env: &mut Environment,
-    _timer: CFRunLoopTimerRef,
+    env: &mut Environment,
+    timer: CFRunLoopTimerRef,
 ) -> CFTimeInterval {
-    0.0
+    if timer.is_null() {
+        return 0.0;
+    }
+    let date: id = msg![env; timer fireDate];
+    if date.is_null() {
+        0.0
+    } else {
+        msg![env; date timeIntervalSinceReferenceDate]
+    }
 }
 
 fn CFRunLoopTimerSetNextFireDate(
-    _env: &mut Environment,
-    _timer: CFRunLoopTimerRef,
-    _fire_date: CFTimeInterval,
+    env: &mut Environment,
+    timer: CFRunLoopTimerRef,
+    fire_date: CFTimeInterval,
 ) {
-    log_dbg!("CFRunLoopTimerSetNextFireDate: stubbed");
+    if !timer.is_null() {
+        let date: id = msg_class![env; NSDate dateWithTimeIntervalSinceReferenceDate:fire_date];
+        let _: () = msg![env; timer setFireDate:date];
+    }
 }
 
-fn CFRunLoopTimerGetInterval(_env: &mut Environment, _timer: CFRunLoopTimerRef) -> CFTimeInterval {
-    0.0
+fn CFRunLoopTimerGetInterval(env: &mut Environment, timer: CFRunLoopTimerRef) -> CFTimeInterval {
+    if timer.is_null() {
+        0.0
+    } else {
+        msg![env; timer timeInterval]
+    }
 }
 
-fn CFRunLoopTimerDoesRepeat(_env: &mut Environment, _timer: CFRunLoopTimerRef) -> bool {
-    false
+fn CFRunLoopTimerDoesRepeat(env: &mut Environment, timer: CFRunLoopTimerRef) -> bool {
+    !timer.is_null() && CFRunLoopTimerGetInterval(env, timer) > 0.0
 }
 
 fn CFRunLoopTimerGetOrder(_env: &mut Environment, _timer: CFRunLoopTimerRef) -> i32 {
