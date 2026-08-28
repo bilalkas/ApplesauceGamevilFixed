@@ -1088,7 +1088,8 @@ fn path_for_resource_helper(
 
     let file_manager: id = msg_class![env; NSFileManager defaultManager];
     let file_exists: bool = msg![env; file_manager fileExistsAtPath:path];
-    if file_exists {
+    let path_str = ns_string::to_rust_string(env, path);
+    if file_exists && env.fs.is_file(crate::fs::GuestPath::new(path_str.as_ref())) {
         return path;
     }
 
@@ -1100,18 +1101,18 @@ fn path_for_resource_helper(
     let data_path: id = msg![env; path stringByAppendingPathComponent:data_component];
     let data_path: id = msg![env; data_path stringByAppendingPathComponent:name];
     let data_path_exists: bool = msg![env; file_manager fileExistsAtPath:data_path];
+    let data_path_str = ns_string::to_rust_string(env, data_path);
     log!(
         "NSBundle resource lookup: {:?} missing, Unity Data fallback {:?} exists={}",
         path,
         data_path,
-        data_path_exists
+        data_path_exists && env.fs.is_file(crate::fs::GuestPath::new(data_path_str.as_ref()))
     );
-    if data_path_exists {
+    if data_path_exists && env.fs.is_file(crate::fs::GuestPath::new(data_path_str.as_ref())) {
         return data_path;
     }
 
     // Case-insensitive fallback: scan the parent directory.
-    let path_str = ns_string::to_rust_string(env, path);
     let rust_path = std::path::Path::new(path_str.as_ref());
     if let (Some(parent), Some(file_name)) = (rust_path.parent(), rust_path.file_name()) {
         let parent_str = parent.to_str().unwrap_or("");
@@ -1121,7 +1122,10 @@ fn path_for_resource_helper(
         // from_rust_string (which needs a mutable borrow on env).
         let found: Option<String> = env.fs.enumerate(parent_guest).ok().and_then(|mut entries| {
             entries
-                .find(|e| e.to_lowercase() == target_name)
+                .find(|e| {
+                    e.to_lowercase() == target_name
+                        && env.fs.is_file(crate::fs::GuestPath::new(&format!("{parent_str}/{e}")))
+                })
                 .map(|e| format!("{}/{}", parent_str, e))
         });
         if let Some(full) = found {
