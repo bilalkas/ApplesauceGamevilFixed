@@ -1070,7 +1070,12 @@ fn path_for_resource_helper(
     {
         let file_manager: id = msg_class![env; NSFileManager defaultManager];
         if msg![env; file_manager fileExistsAtPath:path] {
-            log!("NSBundle: resolved WIPI resource {:?} to {:?}", name_str, path);
+            log!(
+                "NSBundle: resolved WIPI resource {:?} to {:?} (path={:?})",
+                name_str,
+                path,
+                ns_string::to_rust_string(env, path)
+            );
             return path;
         }
     }
