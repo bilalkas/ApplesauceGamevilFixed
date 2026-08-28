@@ -233,7 +233,7 @@ private final class GameLibrary: ObservableObject {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )
-            .filter { ["ipa", "app"].contains($0.pathExtension.lowercased()) }
+            .filter { ["ipa", "app", "z3pkg"].contains($0.pathExtension.lowercased()) }
             .map(gameFile(from:))
             .sorted {
                 $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
@@ -792,6 +792,7 @@ private struct LibraryView: View {
     @AppStorage("analogTilt") private var analogTilt = true
 
     private static let ipaType = UTType(filenameExtension: "ipa") ?? .archive
+    private static let z3pkgType = UTType(filenameExtension: "z3pkg") ?? .archive
 
     var body: some View {
         TouchHLENavigationContainer {
@@ -870,7 +871,7 @@ private struct LibraryView: View {
             }
             .fileImporter(
                 isPresented: $showingImporter,
-                allowedContentTypes: [Self.ipaType],
+                allowedContentTypes: [Self.ipaType, Self.z3pkgType],
                 allowsMultipleSelection: false
             ) { result in
                 switch result {

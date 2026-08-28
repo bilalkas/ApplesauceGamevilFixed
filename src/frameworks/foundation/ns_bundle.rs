@@ -1064,10 +1064,7 @@ fn path_for_resource_helper(
         }
     }
 
-    if directory != nil
-        && directory_str == "com"
-        && name_str.to_ascii_lowercase().ends_with(".zt1")
-    {
+    if name_str.to_ascii_lowercase().ends_with(".zt1") {
         let wipi_path = ns_string::to_rust_string(env, path).into_owned();
         let wipi_file = crate::fs::GuestPath::new(&wipi_path);
         if env.fs.is_file(wipi_file) {

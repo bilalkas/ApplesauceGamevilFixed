@@ -262,10 +262,9 @@ impl Environment {
         let startup_time = Instant::now();
         let launched_bundle_id = bundle.bundle_identifier().to_owned();
 
-        if matches!(
-            launched_bundle_id.as_str(),
-            "at.source.potato.full" | "com.gamevil.zenonia3" | "com.gamevil.zenonia3f2p"
-        ) {
+        if launched_bundle_id.starts_with("com.gamevil.")
+            || launched_bundle_id == "at.source.potato.full"
+        {
             log!(
         "Applying compatibility profile: fake network success for {}.",
         launched_bundle_id
