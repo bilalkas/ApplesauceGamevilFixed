@@ -293,6 +293,42 @@ fn CFURLCreatePropertyFromResource(
             let len = file_size.unwrap_or(0);
             msg_class![env; NSNumber numberWithUnsignedLongLong:len]
         }
+        "kCFURLFileDirectoryContents" => {
+            if is_directory {
+                if let Some(path_string) = path_string.as_deref() {
+                    if let Ok(entries) = env.fs.enumerate(GuestPath::new(path_string)) {
+                        let arr: id = msg_class![env; NSMutableArray array];
+                        for entry in entries {
+                            let s = from_rust_string(env, entry.to_string());
+                            let _: () = msg![env; arr addObject:s];
+                        }
+                        arr
+                    } else {
+                        msg_class![env; NSArray array]
+                    }
+                } else {
+                    msg_class![env; NSArray array]
+                }
+            } else {
+                msg_class![env; NSArray array]
+            }
+        }
+        "kCFURLFileLastModificationTime" => {
+            let mtime_secs = if let Some(path_string) = path_string.as_deref() {
+                env.fs.modified(GuestPath::new(path_string)).unwrap_or(0)
+            } else {
+                0
+            };
+            let mtime = mtime_secs as f64;
+            msg_class![env; NSDate dateWithTimeIntervalSince1970:mtime]
+        }
+        "kCFURLFilePOSIXMode" => {
+            let mode: u32 = if is_directory { 0o755 } else { 0o644 };
+            msg_class![env; NSNumber numberWithUnsignedInt:mode]
+        }
+        "kCFURLFileOwnerID" => {
+            msg_class![env; NSNumber numberWithUnsignedInt:0u32]
+        }
         "NSURLIsDirectoryKey" => {
             msg_class![env; NSNumber numberWithBool:is_directory]
         }
@@ -304,7 +340,14 @@ fn CFURLCreatePropertyFromResource(
             let path: id = msg![env; url path];
             msg![env; path lastPathComponent]
         }
-        _ => nil,
+        _ => {
+            log_dbg!(
+                "CFURLCreatePropertyFromResource: unsupported key {:?} for path {:?}",
+                property_name,
+                path_string
+            );
+            nil
+        }
     };
 
     if value.is_null() {
@@ -1217,8 +1260,24 @@ pub const CONSTANTS: ConstantExports = &[
         "_kCFURLFileExists",
         HostConstant::NSString("kCFURLFileExists"),
     ),
+    (
+        "_kCFURLFileDirectoryContents",
+        HostConstant::NSString("kCFURLFileDirectoryContents"),
+    ),
     ("_kCFURLFileLength", HostConstant::NSString("NSURLFileSize")),
     ("_kCFURLFileSize", HostConstant::NSString("NSURLFileSize")),
+    (
+        "_kCFURLFileLastModificationTime",
+        HostConstant::NSString("kCFURLFileLastModificationTime"),
+    ),
+    (
+        "_kCFURLFilePOSIXMode",
+        HostConstant::NSString("kCFURLFilePOSIXMode"),
+    ),
+    (
+        "_kCFURLFileOwnerID",
+        HostConstant::NSString("kCFURLFileOwnerID"),
+    ),
     (
         "_kCFURLFileSizeKey",
         HostConstant::NSString("NSURLFileSizeKey"),
