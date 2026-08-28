@@ -127,7 +127,9 @@ impl BundleData {
         if path.is_file()
             && path
                 .extension()
-                .map(|ext| ext.eq_ignore_ascii_case("ipa"))
+                .map(|ext| {
+                    ext.eq_ignore_ascii_case("ipa") || ext.eq_ignore_ascii_case("z3pkg")
+                })
                 .unwrap_or(false)
         {
             Ok(Self::open_ipa(path)?)
@@ -135,7 +137,7 @@ impl BundleData {
             Ok(Self::open_host_dir(path)?)
         } else {
             Err(format!(
-                "{} is not a directory or an IPA file",
+                "{} is not a directory, IPA file, or Zenonia package",
                 path.display()
             ))
         }
