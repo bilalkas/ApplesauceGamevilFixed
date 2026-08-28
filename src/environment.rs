@@ -1903,27 +1903,6 @@ impl Environment {
                     }
                 }
 
-                // Zenonia's WIPI resource failure can call through a null
-                // function pointer, which Dynarmic reports as an instruction
-                // at 0x1000. A failed C resource lookup returns NULL in r0;
-                // preserve that ABI result before returning to the caller.
-                if matches!(
-                    self.bundle.bundle_identifier(),
-                    "com.gamevil.zenonia3" | "com.gamevil.zenonia3f2p"
-                ) && pc == 0x1000
-                {
-                    log_no_panic!(
-                        "Zenonia WIPI resource fallback: returning NULL from invalid call at {:#x} to LR {:#x}",
-                        pc,
-                        lr
-                    );
-                    self.cpu.regs_mut()[0] = 0;
-                    self.cpu.branch(GuestFunction::from_addr_with_thumb_bit(lr));
-                    self.udf_bypass_last = None;
-                    self.udf_bypass_count = 0;
-                    return;
-                }
-
                 // Track repeated occurrences of the same bypass site.
                 const BYPASS_LIMIT: u32 = 256;
                 const LOG_RATE: u32 = 32;
