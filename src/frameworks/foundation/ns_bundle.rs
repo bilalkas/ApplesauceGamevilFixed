@@ -1055,6 +1055,17 @@ fn path_for_resource_helper(
         }
     }
 
+    if directory != nil
+        && directory_str == "com"
+        && name_str.to_ascii_lowercase().ends_with(".zt1")
+    {
+        let file_manager: id = msg_class![env; NSFileManager defaultManager];
+        if msg![env; file_manager fileExistsAtPath:path] {
+            log!("NSBundle: resolved WIPI resource {:?} to {:?}", name_str, path);
+            return path;
+        }
+    }
+
     let file_manager: id = msg_class![env; NSFileManager defaultManager];
     let file_exists: bool = msg![env; file_manager fileExistsAtPath:path];
     if file_exists {
