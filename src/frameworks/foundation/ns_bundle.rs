@@ -857,7 +857,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         } else {
             // Else, load as standard format
             load_strings_as_standard_format(env, dict_url)
-        }
+        };
         if dict == nil {
             return if value == nil || value == empty_str { key } else { value };
         }
@@ -870,7 +870,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             .localization_tables
             .insert(name, dict);
         dict
-    }
+    };
     // 6. Final String Extraction
     let res: id = msg![env; dict objectForKey:key];
     if res == nil {
