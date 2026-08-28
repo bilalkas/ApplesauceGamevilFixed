@@ -3,15 +3,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-//! `CFStream` — `CFReadStream` and `CFWriteStream` stubs.
+//! `CFStream` — `CFReadStream` and `CFWriteStream`.
+//!
+//! The socket/network variants are stubs, but file streams created by
+//! `CFReadStreamCreateWithFile` are backed by a real guest file descriptor:
+//! Gamevil's WIPI-to-iOS wrapper (Zenonia 3/4) loads every `.zt1` resource
+//! through `CFBundleCopyResourceURL` + `CFReadStreamCreateWithFile`.
 
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::frameworks::core_foundation::cf_allocator::CFAllocatorRef;
 use crate::frameworks::core_foundation::cf_string::CFStringRef;
 use crate::frameworks::core_foundation::{CFRelease, CFRetain, CFTypeRef};
 use crate::frameworks::foundation::ns_string;
+use crate::libc::posix_io;
 use crate::mem::{ConstPtr, MutPtr, MutVoidPtr};
-use crate::objc::{nil, objc_classes, ClassExports, HostObject};
+use crate::objc::{id, msg, nil, objc_classes, ClassExports, HostObject};
 use crate::Environment;
 
 pub type CFReadStreamRef = CFTypeRef;
@@ -284,6 +290,13 @@ struct CFReadStreamHostObject {
     status: CFStreamStatus,
     offset: usize,
     data: Vec<u8>,
+    /// Guest path, for streams made by [CFReadStreamCreateWithFile]. Real Core
+    /// Foundation only touches the file when the stream is opened, so we keep
+    /// the path here and open lazily.
+    file_path: Option<String>,
+    /// Live file descriptor, between `CFReadStreamOpen` and
+    /// `CFReadStreamClose`/dealloc. Only ever set for file streams.
+    fd: Option<posix_io::FileDescriptor>,
 }
 impl HostObject for CFReadStreamHostObject {}
 
@@ -300,6 +313,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 @implementation _touchHLE_CFReadStream: NSObject
 - (())dealloc {
+    // A stream that is released without CFReadStreamClose still owns its fd.
+    let fd = env.objc.borrow_mut::<CFReadStreamHostObject>(this).fd.take();
+    if let Some(fd) = fd {
+        posix_io::close(env, fd);
+    }
     env.objc.dealloc_object(this, &mut env.mem)
 }
 @end
@@ -324,6 +342,8 @@ fn alloc_read_stream(env: &mut Environment) -> CFReadStreamRef {
             status: kCFStreamStatusNotOpen,
             offset: 0,
             data: Vec::new(),
+            file_path: None,
+            fd: None,
         }),
         &mut env.mem,
     )
@@ -386,10 +406,31 @@ fn CFReadStreamCreateWithBytesNoCopy(
 fn CFReadStreamCreateWithFile(
     env: &mut Environment,
     _allocator: CFAllocatorRef,
-    _file_url: CFTypeRef, // CFURLRef
+    file_url: CFTypeRef, // CFURLRef
 ) -> CFReadStreamRef {
-    log_dbg!("CFReadStreamCreateWithFile: stubbed");
-    alloc_read_stream(env)
+    let path = if file_url.is_null() {
+        None
+    } else {
+        let path: id = msg![env; file_url path];
+        if path.is_null() {
+            None
+        } else {
+            Some(ns_string::to_rust_string(env, path).into_owned())
+        }
+    };
+    if path.is_none() {
+        log!(
+            "CFReadStreamCreateWithFile: no file path for URL {:?}; \
+             the stream will fail to open.",
+            file_url
+        );
+    }
+    log_dbg!("CFReadStreamCreateWithFile({:?})", path);
+    let stream = alloc_read_stream(env);
+    env.objc
+        .borrow_mut::<CFReadStreamHostObject>(stream)
+        .file_path = path;
+    stream
 }
 
 fn CFWriteStreamCreateWithFile(
@@ -483,9 +524,32 @@ fn CFReadStreamOpen(env: &mut Environment, stream: CFReadStreamRef) -> bool {
     if stream.is_null() {
         return false;
     }
+    let (file_path, already_open) = {
+        let host = env.objc.borrow::<CFReadStreamHostObject>(stream);
+        (host.file_path.clone(), host.fd.is_some())
+    };
+    let Some(file_path) = file_path else {
+        let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
+        host.status = kCFStreamStatusOpen;
+        host.offset = 0;
+        return true;
+    };
+    if already_open {
+        // Opening twice is a guest error; don't leak the first descriptor.
+        return true;
+    }
+    let path_cstr = env.mem.alloc_and_write_cstr(file_path.as_bytes());
+    let fd = posix_io::open_direct(env, path_cstr.cast_const(), posix_io::O_RDONLY);
+    env.mem.free(path_cstr.cast());
     let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
+    if fd == -1 {
+        log!("CFReadStreamOpen: could not open {:?}", file_path);
+        host.status = kCFStreamStatusError;
+        return false;
+    }
+    log_dbg!("CFReadStreamOpen({:?}) => fd {}", file_path, fd);
+    host.fd = Some(fd);
     host.status = kCFStreamStatusOpen;
-    host.offset = 0;
     true
 }
 
@@ -493,7 +557,10 @@ fn CFReadStreamClose(env: &mut Environment, stream: CFReadStreamRef) {
     if stream.is_null() {
         return;
     }
-    log_dbg!("CFReadStreamClose: stubbed");
+    let fd = env.objc.borrow_mut::<CFReadStreamHostObject>(stream).fd.take();
+    if let Some(fd) = fd {
+        posix_io::close(env, fd);
+    }
     env.objc.borrow_mut::<CFReadStreamHostObject>(stream).status = kCFStreamStatusClosed;
 }
 
@@ -554,8 +621,35 @@ fn CFReadStreamRead(
     if stream.is_null() || buffer.is_null() || buffer_length < 0 {
         return -1;
     }
+    let (is_file, fd, status) = {
+        let host = env.objc.borrow::<CFReadStreamHostObject>(stream);
+        (host.file_path.is_some(), host.fd, host.status)
+    };
+    if is_file {
+        let Some(fd) = fd else {
+            env.objc.borrow_mut::<CFReadStreamHostObject>(stream).status = kCFStreamStatusError;
+            return -1;
+        };
+        // Reading at EOF is legal and returns 0, so kCFStreamStatusAtEnd is
+        // not an error here.
+        if status != kCFStreamStatusOpen
+            && status != kCFStreamStatusReading
+            && status != kCFStreamStatusAtEnd
+        {
+            return -1;
+        }
+        env.objc.borrow_mut::<CFReadStreamHostObject>(stream).status = kCFStreamStatusReading;
+        let bytes_read = posix_io::read(env, fd, buffer.cast(), buffer_length as u32);
+        let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
+        if bytes_read == 0 {
+            host.status = kCFStreamStatusAtEnd;
+        } else if bytes_read < 0 {
+            host.status = kCFStreamStatusError;
+        }
+        return bytes_read;
+    }
     let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
-    if host.status != kCFStreamStatusOpen && host.status != kCFStreamStatusReading {
+    if status != kCFStreamStatusOpen && status != kCFStreamStatusReading {
         return -1;
     }
     let remaining = host.data.len().saturating_sub(host.offset);
@@ -585,8 +679,35 @@ fn CFReadStreamHasBytesAvailable(env: &mut Environment, stream: CFReadStreamRef)
     if stream.is_null() {
         return false;
     }
-    let host = env.objc.borrow::<CFReadStreamHostObject>(stream);
-    host.offset < host.data.len()
+    let (is_file, fd, status, offset, len) = {
+        let host = env.objc.borrow::<CFReadStreamHostObject>(stream);
+        (
+            host.file_path.is_some(),
+            host.fd,
+            host.status,
+            host.offset,
+            host.data.len(),
+        )
+    };
+    if is_file {
+        let Some(fd) = fd else {
+            return false;
+        };
+        if status == kCFStreamStatusAtEnd {
+            return false;
+        }
+        let current = posix_io::lseek(env, fd, 0, posix_io::SEEK_CUR);
+        if current == -1 {
+            return false;
+        }
+        let end = posix_io::lseek(env, fd, 0, posix_io::SEEK_END);
+        if end == -1 {
+            return false;
+        }
+        posix_io::lseek(env, fd, current, posix_io::SEEK_SET);
+        return end > current;
+    }
+    offset < len
 }
 
 fn CFWriteStreamWrite(
