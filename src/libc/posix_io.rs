@@ -325,7 +325,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
         }
     }
 
-    let actual_path_string = case_insensitive_path(env, &path_string)
+    let mut actual_path_string = case_insensitive_path(env, &path_string)
         .or_else(|| {
             if (flags & O_CREAT) != 0 {
                 return None;
@@ -339,15 +339,22 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
             case_insensitive_path(env, &bundle_relative_path)
                 .or_else(|| case_insensitive_path(env, &bundle_data_path))
         })
+        .unwrap_or_else(|| path_string.clone());
 
     if path_string.to_ascii_lowercase().ends_with(".zt1") {
+        if actual_path_string == path_string && path_string.starts_with("com/") {
+            let bundle_root = env.bundle.bundle_path().as_str().trim_end_matches('/');
+            let bundle_path = format!("{bundle_root}/{path_string}");
+            if let Some(resolved) = case_insensitive_path(env, &bundle_path) {
+                actual_path_string = resolved;
+            }
+        }
         log!(
             "open(): Zenonia resource {:?} resolved to {:?}",
             path_string,
             actual_path_string
         );
     }
-        .unwrap_or_else(|| path_string.clone());
 
     // ИСПРАВЛЕНИЕ 2: корректная реализация O_EXCL.
     // O_CREAT|O_EXCL означает «создать файл, но вернуть ошибку, если он уже
