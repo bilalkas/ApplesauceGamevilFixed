@@ -1068,18 +1068,15 @@ fn path_for_resource_helper(
         && directory_str == "com"
         && name_str.to_ascii_lowercase().ends_with(".zt1")
     {
-        let wipi_path = ns_string::to_rust_string(env, path).into_owned();
-        let wipi_file = crate::fs::GuestPath::new(&wipi_path);
-        if env.fs.is_file(wipi_file) {
-            let wipi_size = env.fs.size(wipi_file).unwrap_or(0);
-            let canonical_path = ns_string::from_rust_string(env, wipi_path);
+        let file_manager: id = msg_class![env; NSFileManager defaultManager];
+        if msg![env; file_manager fileExistsAtPath:path] {
             log!(
-                "NSBundle: verified WIPI resource {:?} ({} bytes) at {:?}",
+                "NSBundle: resolved WIPI resource {:?} to {:?} (path={:?})",
                 name_str,
-                wipi_size,
-                canonical_path
+                path,
+                ns_string::to_rust_string(env, path)
             );
-            return canonical_path;
+            return path;
         }
     }
 
