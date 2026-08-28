@@ -461,9 +461,18 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)resourceURL   { msg![env; this bundleURL]  }
 
 - (id)executablePath {
-    let exec_path_str = env.bundle.executable_path().as_str().to_string();
-    let exec_path = from_rust_string(env, exec_path_str);
-    autorelease(env, exec_path)
+    let bundle_path: id = msg![env; this bundlePath];
+    if bundle_path == nil {
+        return nil;
+    }
+    let key = ns_string::get_static_str(env, "CFBundleExecutable");
+    let executable_name: id = msg![env; this objectForInfoDictionaryKey:key];
+    if executable_name == nil {
+        return nil;
+    }
+    let executable_path: id =
+        msg![env; bundle_path stringByAppendingPathComponent:executable_name];
+    autorelease(env, executable_path)
 }
 - (id)executableURL {
     // TODO: cache result
@@ -1043,8 +1052,8 @@ fn path_for_resource_helper(
         // Pointing at the executable path mirrors the layout SexyAppBase
         // games actually expect and is harmless for callers that just use
         // the value as a directory hint.
-        let exec_path_str = env.bundle.executable_path().as_str().to_string();
-        return ns_string::from_rust_string(env, exec_path_str);
+        let exec_path: id = msg![env; bundle executablePath];
+        return exec_path;
     }
     path = msg![env; path stringByAppendingPathComponent:name];
 
