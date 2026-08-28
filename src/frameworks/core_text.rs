@@ -330,6 +330,65 @@ fn CTFontGetLeading(env: &mut Environment, font: CTFontRef) -> CGFloat {
     msg![env; ui_font leading]
 }
 
+fn CTFontGetCapHeight(env: &mut Environment, font: CTFontRef) -> CGFloat {
+    if font.is_null() {
+        return 0.0;
+    }
+    let ui_font = env.objc.borrow::<CTFontHostObject>(font).font;
+    if ui_font == nil {
+        return 0.0;
+    }
+    msg![env; ui_font ascender] * 0.7
+}
+
+fn CTFontGetXHeight(env: &mut Environment, font: CTFontRef) -> CGFloat {
+    if font.is_null() {
+        return 0.0;
+    }
+    let ui_font = env.objc.borrow::<CTFontHostObject>(font).font;
+    if ui_font == nil {
+        return 0.0;
+    }
+    msg![env; ui_font pointSize] * 0.5
+}
+
+fn CTFontGetUnderlinePosition(env: &mut Environment, font: CTFontRef) -> CGFloat {
+    if font.is_null() {
+        return 0.0;
+    }
+    let ui_font = env.objc.borrow::<CTFontHostObject>(font).font;
+    if ui_font == nil {
+        return 0.0;
+    }
+    -(msg![env; ui_font pointSize] * 0.1)
+}
+
+fn CTFontCreateForString(
+    env: &mut Environment,
+    current_font: CTFontRef,
+    _string: id,
+    _range: CFRange,
+) -> CTFontRef {
+    if current_font.is_null() {
+        return nil;
+    }
+    retain(env, current_font);
+    current_font
+}
+
+fn CTFontCopyDisplayName(env: &mut Environment, font: CTFontRef) -> id {
+    if font.is_null() {
+        return nil;
+    }
+    let ui_font = env.objc.borrow::<CTFontHostObject>(font).font;
+    if ui_font == nil {
+        return nil;
+    }
+    let name: id = msg![env; ui_font fontName];
+    retain(env, name);
+    name
+}
+
 fn CFAttributedStringCreate(
     env: &mut Environment,
     _allocator: crate::frameworks::core_foundation::cf_allocator::CFAllocatorRef,
@@ -857,6 +916,11 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CTFontGetDescent(_)),
     export_c_func!(CTFontGetLeading(_)),
     export_c_func!(CTFontGetSize(_)),
+    export_c_func!(CTFontGetCapHeight(_)),
+    export_c_func!(CTFontGetXHeight(_)),
+    export_c_func!(CTFontGetUnderlinePosition(_)),
+    export_c_func!(CTFontCreateForString(_, _, _)),
+    export_c_func!(CTFontCopyDisplayName(_)),
     export_c_func!(CTParagraphStyleCreate(_, _)),
     export_c_func!(CTParagraphStyleCreateCopy(_)),
     export_c_func!(CTParagraphStyleGetValueForSpecifier(_, _, _, _)),

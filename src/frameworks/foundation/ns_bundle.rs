@@ -1122,6 +1122,33 @@ fn path_for_resource_helper(
             return ns_string::from_rust_string(env, full);
         }
     }
+
+    // Gamevil's WIPI-to-iOS wrapper (Zenonia 3/4) asks MC_knlGetResource for
+    // bare names like "light80x50.zt1", but the build kept those files in
+    // bundle subdirectories such as `com/` and `data/`. Returning nil here
+    // makes the wrapper fopen() a bogus path and then render from a NULL
+    // pointer, so fall back to a recursive search of the bundle.
+    let resource_root: id = msg![env; bundle resourcePath];
+    if resource_root != nil {
+        let root = ns_string::to_rust_string(env, resource_root).into_owned();
+        let file_name = crate::fs::GuestPath::new(path_str.as_ref())
+            .file_name()
+            .unwrap_or_default()
+            .to_string();
+        let found = env
+            .fs
+            .find_file_by_name(crate::fs::GuestPath::new(&root), &file_name)
+            .map(String::from);
+        if let Some(found) = found {
+            log!(
+                "NSBundle: resolved {:?} to {:?} via recursive bundle search",
+                file_name,
+                found
+            );
+            return ns_string::from_rust_string(env, found);
+        }
+    }
+
     nil
 }
 

@@ -265,6 +265,9 @@ impl Environment {
         if launched_bundle_id.starts_with("com.gamevil.")
             || launched_bundle_id == "at.source.potato.full"
         {
+            if launched_bundle_id.starts_with("com.gamevil.") {
+                options.network_access = true;
+            }
             log!(
         "Applying compatibility profile: fake network success for {}.",
         launched_bundle_id

@@ -325,7 +325,7 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
         }
     }
 
-    let mut actual_path_string = case_insensitive_path(env, &path_string)
+    let actual_path_string = case_insensitive_path(env, &path_string)
         .or_else(|| {
             if (flags & O_CREAT) != 0 {
                 return None;
@@ -338,17 +338,24 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
             let bundle_data_path = format!("{bundle_root}/Data/{data_relative_path}");
             case_insensitive_path(env, &bundle_relative_path)
                 .or_else(|| case_insensitive_path(env, &bundle_data_path))
+                .or_else(|| {
+                    // Gamevil's WIPI-to-iOS wrapper (Zenonia 3/4) builds
+                    // resource paths from the bundle root plus a bare name,
+                    // but the build kept those files in subdirectories such
+                    // as `com/` and `data/`. Only bundle-relative reads get
+                    // this treatment, so save files still fail normally.
+                    if relative_path.starts_with('/') && !relative_path.starts_with(bundle_root) {
+                        return None;
+                    }
+                    let file_name = GuestPath::new(relative_path).file_name()?;
+                    env.fs
+                        .find_file_by_name(GuestPath::new(bundle_root), file_name)
+                        .map(String::from)
+                })
         })
         .unwrap_or_else(|| path_string.clone());
 
     if path_string.to_ascii_lowercase().ends_with(".zt1") {
-        if actual_path_string == path_string && path_string.starts_with("com/") {
-            let bundle_root = env.bundle.bundle_path().as_str().trim_end_matches('/');
-            let bundle_path = format!("{bundle_root}/{path_string}");
-            if let Some(resolved) = case_insensitive_path(env, &bundle_path) {
-                actual_path_string = resolved;
-            }
-        }
         log!(
             "open(): Zenonia resource {:?} resolved to {:?}",
             path_string,

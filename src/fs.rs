@@ -898,7 +898,24 @@ impl Fs {
             else {
                 return None;
             };
-            node = children.get(*component)?
+            node = match children.get(*component) {
+                Some(node) => node,
+                // iPhone OS formatted its data partition as case-insensitive
+                // HFSX, so apps could get away with mismatched casing. Gamevil's
+                // WIPI wrapper (Zenonia 3/4) relies on this when it lowercases
+                // resource names before calling fopen().
+                None => {
+                    let (name, node) = children
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(component))?;
+                    log_dbg!(
+                        "Resolved guest path component {:?} to {:?} case-insensitively",
+                        component,
+                        name
+                    );
+                    node
+                }
+            }
         }
         Some(node)
     }
@@ -1101,6 +1118,44 @@ impl Fs {
         }
         assert!(component_stack.is_empty() && iterator_stack.is_empty());
         Ok(paths)
+    }
+
+    /// Search `base` recursively for a file whose name matches `file_name`
+    /// case-insensitively, and return its full guest path.
+    ///
+    /// This exists for apps that request a bundle resource by bare name even
+    /// though it lives in a bundle subdirectory (e.g. Zenonia 3's
+    /// `com/light80x50.zt1`). It is a fallback: callers must try the exact
+    /// path first.
+    pub fn find_file_by_name<P: AsRef<GuestPath>>(
+        &self,
+        base: P,
+        file_name: &str,
+    ) -> Option<GuestPathBuf> {
+        let base = base.as_ref();
+        let mut candidates: Vec<GuestPathBuf> = self
+            .enumerate_recursive(base)
+            .ok()?
+            .into_iter()
+            .filter(|relative| {
+                relative
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(file_name))
+            })
+            .collect();
+        // enumerate_recursive walks HashMaps, so order is not stable between
+        // runs. Prefer the shallowest match and break ties by name so the same
+        // request always resolves to the same file.
+        candidates.sort_by(|a, b| {
+            let depth = |p: &GuestPathBuf| p.as_str().matches('/').count();
+            depth(a)
+                .cmp(&depth(b))
+                .then_with(|| a.as_str().cmp(b.as_str()))
+        });
+        candidates
+            .into_iter()
+            .map(|relative| base.join(relative.as_str()))
+            .find(|full| self.is_file(full))
     }
 
     /// Like [std::fs::read] but for the guest filesystem.
