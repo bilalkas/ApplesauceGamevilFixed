@@ -339,6 +339,14 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
             case_insensitive_path(env, &bundle_relative_path)
                 .or_else(|| case_insensitive_path(env, &bundle_data_path))
         })
+
+    if path_string.to_ascii_lowercase().ends_with(".zt1") {
+        log!(
+            "open(): Zenonia resource {:?} resolved to {:?}",
+            path_string,
+            actual_path_string
+        );
+    }
         .unwrap_or_else(|| path_string.clone());
 
     // ИСПРАВЛЕНИЕ 2: корректная реализация O_EXCL.
