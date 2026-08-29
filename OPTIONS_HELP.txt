@@ -318,6 +318,37 @@ Other options:
         Enabling this option may solve some rendering issues, but implies
         a performance hit which is undesirable in most of the cases.
 
+        Note: on the iOS host this does not force compositing of an app that
+        presents an EAGL renderbuffer, because the compositor's output is not
+        visible there; see --ios-es1-direct-present.
+
+    --ios-es2-direct-present
+    --no-ios-es2-direct-present
+    --ios-es1-direct-present
+    --no-ios-es1-direct-present
+        (iOS host only.) Present a renderbuffer directly, skipping the Core
+        Animation compositor, even when its CAEAGLayer was not recognised as
+        the fullscreen layer.
+
+        On iOS the compositor cannot reach the screen once the app has created
+        an EAGLContext of its own: SDL2 gives every GL context its own
+        SDL_uikitopenglview and detaches the previously attached one from the
+        window, so the framebuffer the compositor draws into is no longer the
+        visible one. An app whose layer misses the fullscreen fast path — its
+        bounds don't match the screen's, or --force-composition was given —
+        then renders into a surface that is never shown: a black screen, with
+        working sound and touch input.
+
+        The ES 1.1 variant is on by default for that reason; pass
+        --no-ios-es1-direct-present for the old behaviour. The ES 2.0 variant
+        is off by default, because it additionally costs a glFinish plus a
+        full renderbuffer readback and re-upload every frame on the main
+        thread, which starves UIKit of run-loop time; enable it per app (e.g.
+        The Sims Medieval).
+
+        If the picture appears rotated on the direct path, combine this with
+        --present-rotation=.
+
     --prefer-gles2-context
         Force EAGL initWithAPI: to create an OpenGL ES 2.0 context even when
         the app requested an OpenGL ES 1.1 context.

@@ -452,6 +452,29 @@ pub const CLASSES: ClassExports = objc_classes! {
         // ULTRAHLE_MINIONJUMP_RENDERBUFFER_END
     };
 
+    // Whether the drawable matches the screen decides between the direct
+    // presenter and the Core Animation compositor later on, and on iOS the
+    // latter is not visible at all, so record the numbers that the decision is
+    // made from. This is called once per surface (re)creation, not per frame.
+    {
+        let screen: id = msg_class![env; UIScreen mainScreen];
+        let screen_bounds: CGRect = msg![env; screen bounds];
+        let screen_width = screen_bounds.size.width;
+        let screen_height = screen_bounds.size.height;
+        let is_fullscreen_layer = find_fullscreen_eagl_layer(env) == drawable;
+        log!(
+            "[EAGLContext renderbufferStorage:{:#x} fromDrawable:{:?}] storage {}x{}, \
+             UIScreen bounds {}x{}, is fullscreen layer: {}",
+            target,
+            drawable,
+            width,
+            height,
+            screen_width,
+            screen_height,
+            is_fullscreen_layer,
+        );
+    }
+
     // Apple's documentation states that the receiver must be the current
     // context when calling `renderbufferStorage:fromDrawable:`.  If no
     // context is current for this thread but `this` has a valid backing GLES
@@ -656,20 +679,80 @@ pub const CLASSES: ClassExports = objc_classes! {
         return false;
     };
 
-    let use_ios_es2_direct_path = cfg!(target_os = "ios")
+    // On iOS the Core Animation composition path cannot reach the screen once
+    // the guest owns a GL context of its own: SDL2 creates a separate
+    // SDL_uikitopenglview per GL context and detaches the previously attached
+    // one from the window (`-[SDL_uikitview setSDLWindow:]`), so the
+    // framebuffer the compositor renders into is not the one on screen. A
+    // renderbuffer whose layer isn't recognised as *the* fullscreen layer would
+    // therefore never be displayed — the app keeps rendering, playing audio and
+    // receiving touches, but the screen stays black. Present it directly
+    // instead. This used to be limited to ES 2.0 contexts and opt-in
+    // (`--ios-es2-direct-present`); ES 1.1 apps need it just as much, e.g.
+    // Zenonia 3 F2P, whose layer is pushed off the fast path by
+    // `--force-composition`.
+    let api = env.objc.borrow::<EAGLContextHostObject>(this).api;
+    let ios_no_fullscreen_layer = cfg!(target_os = "ios") && fullscreen_layer == nil;
+    let use_ios_es2_direct_path = ios_no_fullscreen_layer
         && env.options.ios_es2_direct_present
-        && fullscreen_layer == nil
-        && env.objc.borrow::<EAGLContextHostObject>(this).api
-            == kEAGLRenderingAPIOpenGLES2;
+        && api == kEAGLRenderingAPIOpenGLES2;
+    let use_ios_es1_direct_path = ios_no_fullscreen_layer
+        && env.options.ios_es1_direct_present
+        && api != kEAGLRenderingAPIOpenGLES2;
 
     // We're presenting to the opaque CAEAGLLayer that covers the screen.
     // We can use the fast path where we skip composition and present directly.
-    if drawable == fullscreen_layer || use_ios_es2_direct_path {
+    if drawable == fullscreen_layer || use_ios_es2_direct_path || use_ios_es1_direct_path {
         if use_ios_es2_direct_path {
             log_once!(
                 "Using the iOS ES2 direct presenter for a non-fullscreen CAEAGLLayer."
             );
         }
+        if use_ios_es1_direct_path {
+            log_once!(
+                "Using the iOS direct presenter for a non-fullscreen CAEAGLLayer \
+                 (API {}): Core Animation composition is not visible on the iOS \
+                 host. Pass --no-ios-es1-direct-present to disable.",
+                api
+            );
+        }
+        if use_ios_es2_direct_path || use_ios_es1_direct_path {
+            // From now on this layer's frames reach the screen through the
+            // direct presenter, so the Core Animation compositor has to stop
+            // taking the window away from the app's GL context.
+            crate::frameworks::core_animation::set_direct_present_active(env);
+        }
+        // A layer that isn't the fullscreen layer is usually one that UIKit has
+        // already rotated for the display, so the guest is drawing an upright
+        // frame into a landscape-shaped renderbuffer. Rotating that again by the
+        // device orientation would put the picture on its side — this is why The
+        // Sims Medieval needed an explicit `--present-rotation=0`. A drawable
+        // that missed the fast path for some other reason (e.g.
+        // `--force-composition`) still holds a frame in the layer's own
+        // orientation and does need the rotation, so decide from the drawable's
+        // shape rather than assuming. The ES 2.0 override keeps its previous
+        // unconditional behaviour.
+        let skip_device_rotation = if use_ios_es2_direct_path {
+            true
+        } else if use_ios_es1_direct_path {
+            let bounds: CGRect = msg![env; drawable bounds];
+            let CGSize { width, height } = bounds.size;
+            let drawable_is_landscape = width > height;
+            let display_is_landscape = env
+                .window
+                .as_ref()
+                .map(|window| {
+                    matches!(
+                        window.current_rotation(),
+                        crate::window::DeviceOrientation::LandscapeLeft
+                            | crate::window::DeviceOrientation::LandscapeRight
+                    )
+                })
+                .unwrap_or(false);
+            drawable_is_landscape == display_is_landscape
+        } else {
+            false
+        };
         log_dbg!(
             "Layer {:?} is the fullscreen layer, presenting renderbuffer {:?} directly (fast path).",
             drawable,
@@ -677,7 +760,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         );
         // re-borrow
         unsafe {
-            present_renderbuffer(env, this);
+            present_renderbuffer(env, this, skip_device_rotation);
         }
     } else {
         if fullscreen_layer != nil {
@@ -1515,7 +1598,7 @@ unsafe fn ensure_present_objects(gles: &mut dyn GLES) -> PresentObjects {
 /// (which should be provided by the app) to a texture and presents it with
 /// [present_frame], trying to avoid noticeably modifying OpenGL ES state while
 /// doing so. The front and back buffers are then swapped.
-unsafe fn present_renderbuffer(env: &mut Environment, context: id) {
+unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_rotation: bool) {
     // Capture this up front because the env borrow is moved into the GL
     // context machinery below.
     let trace_gl_errors = env.options.trace_gl_errors;
@@ -1544,20 +1627,15 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id) {
                 device_orientation,
                 crate::window::DeviceOrientation::Portrait
             );
-    // When we reach the direct presenter through the iOS ES 2.0 override (i.e.
+    // When we reach the direct presenter through one of the iOS overrides (i.e.
     // the layer is NOT the fullscreen layer, so without the override this frame
     // would have gone through Core Animation composition), the guest has
     // already drawn its content in the display's orientation. Applying the
     // device rotation on top of that turns a correct landscape frame on its
     // side, which is what made The Sims Medieval need an explicit
     // `--present-rotation=0`. Apps that take the ordinary fullscreen-layer fast
-    // path (e.g. Wolfenstein RPG) still need the rotation, so this is scoped to
-    // the override only.
-    let is_ios_es2_override_path = cfg!(target_os = "ios")
-        && env.options.ios_es2_direct_present
-        && crate::frameworks::core_animation::ca_eagl_layer::find_fullscreen_eagl_layer(env) == nil
-        && env.objc.borrow::<EAGLContextHostObject>(context).api == kEAGLRenderingAPIOpenGLES2;
-
+    // path (e.g. Wolfenstein RPG) still need the rotation, so the caller only
+    // sets this for the override paths.
     let rotation_override = env.options.present_rotation_override;
     let rotation_matrix = if let Some(degrees) = rotation_override {
         crate::matrix::Matrix::<2>::z_rotation((degrees as f32).to_radians())
@@ -1566,9 +1644,9 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id) {
             "TOUCHHLE_DISABLE_PRESENT_ROTATION=1: presenting EAGL renderbuffer without texture rotation"
         );
         crate::matrix::Matrix::<2>::identity()
-    } else if is_ios_es2_override_path {
+    } else if skip_device_rotation {
         log_once!(
-            "iOS ES2 direct presenter: guest frame is already in display orientation, not rotating."
+            "iOS direct presenter: guest frame is already in display orientation, not rotating."
         );
         crate::matrix::Matrix::<2>::identity()
     } else if needs_autorotation_compensation {

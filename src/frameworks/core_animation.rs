@@ -22,7 +22,7 @@ pub mod ca_transform3d; // <-- НАШ НОВЫЙ МОДУЛЬ ДЛЯ ТРАНС�
 mod animation;
 mod composition;
 
-pub use composition::recomposite_if_necessary;
+pub use composition::{recomposite_if_necessary, set_direct_present_active};
 
 use crate::abi::{impl_GuestRet_for_large_struct, GuestArg};
 use crate::dyld::{export_c_func, FunctionExports};

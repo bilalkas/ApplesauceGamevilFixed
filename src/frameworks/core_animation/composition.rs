@@ -33,6 +33,29 @@ pub(super) struct State {
     recomposite_next: Option<Instant>,
     fps_counter: Option<FpsCounter>,
     misc_gl_objects: Option<MiscGlObjects>,
+    /// Set once `-[EAGLContext presentRenderbuffer:]` has taken over the screen
+    /// on the iOS host. See [set_direct_present_active].
+    direct_present_active: bool,
+}
+
+/// Called by `-[EAGLContext presentRenderbuffer:]` when it presents a layer
+/// that this compositor would otherwise be responsible for (i.e. one that isn't
+/// recognised as *the* fullscreen layer) directly, which on the iOS host it
+/// always does — see the `ios_es1_direct_present` / `ios_es2_direct_present`
+/// options.
+///
+/// SDL2 on iOS attaches one GL view per GL context to the window and detaches
+/// the previously attached one, so only the context that was made current last
+/// is on screen. If we kept compositing after the app started presenting
+/// directly, every composited frame would take the window away from the app's
+/// context to show a frame that doesn't contain the app's rendering (we no
+/// longer copy it back to RAM on this path), and the screen would flicker
+/// between the two. Presentation is the direct presenter's job from here on.
+pub fn set_direct_present_active(env: &mut Environment) {
+    env.framework_state
+        .core_animation
+        .composition
+        .direct_present_active = true;
 }
 
 struct MiscGlObjects {
@@ -84,6 +107,20 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
     if find_fullscreen_eagl_layer(env) != nil {
         // No composition done, EAGLContext will present directly.
         log_dbg!("Using CAEAGLLayer fast path, skipping composition");
+        return None;
+    }
+
+    if env
+        .framework_state
+        .core_animation
+        .composition
+        .direct_present_active
+    {
+        // Same thing, except the layer wasn't recognised as the fullscreen one
+        // and the direct presenter was used anyway (iOS host only).
+        log_once!(
+            "An EAGL layer is being presented directly, skipping Core Animation composition."
+        );
         return None;
     }
 

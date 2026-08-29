@@ -61,6 +61,23 @@ pub struct Options {
     /// needs to dispatch touches. Off by default so apps that worked without it
     /// keep working; enable per app in the options file.
     pub ios_es2_direct_present: bool,
+    /// The same escape hatch for OpenGL ES 1.1 contexts, which are what the
+    /// overwhelming majority of the apps touchHLE runs use.
+    ///
+    /// On iOS the Core Animation compositor cannot reach the screen once the
+    /// guest has created its own `EAGLContext`: SDL2 gives every GL context its
+    /// own `SDL_uikitopenglview` and detaches the previously attached one from
+    /// the window (`-[SDL_uikitview setSDLWindow:]`), so the framebuffer the
+    /// compositor draws into is no longer the visible one. An ES 1.1 app whose
+    /// `CAEAGLLayer` isn't recognised as the fullscreen layer — because its
+    /// bounds don't match `UIScreen`'s, or because `--force-composition` was
+    /// passed — therefore renders every frame into a surface that is never
+    /// shown: a black screen with working audio and input (Zenonia 3 F2P).
+    ///
+    /// Unlike the ES 2.0 variant this is on by default, because the path it
+    /// replaces displays nothing at all on iOS. Pass
+    /// `--no-ios-es1-direct-present` to get the old behaviour back.
+    pub ios_es1_direct_present: bool,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
     pub analog_stick_tilt_controls: bool,
@@ -141,6 +158,7 @@ impl Default for Options {
             initial_orientation: DeviceOrientation::Portrait,
             present_rotation_override: None,
             ios_es2_direct_present: false,
+            ios_es1_direct_present: true,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
             deadzone: 0.1,
@@ -201,6 +219,10 @@ impl Options {
             self.ios_es2_direct_present = true;
         } else if arg == "--no-ios-es2-direct-present" {
             self.ios_es2_direct_present = false;
+        } else if arg == "--ios-es1-direct-present" {
+            self.ios_es1_direct_present = true;
+        } else if arg == "--no-ios-es1-direct-present" {
+            self.ios_es1_direct_present = false;
         } else if let Some(value) = arg.strip_prefix("--present-rotation=") {
             self.present_rotation_override = if value == "auto" {
                 None

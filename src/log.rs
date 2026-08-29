@@ -50,14 +50,26 @@ macro_rules! log_dbg {
     }
 }
 
-/// Like [log], but messages only log once and cannot have formatting.
+/// Like [log], but messages only log once.
 /// To be used for log messages that are known to spam the log file (like those
 /// logged every frame).
+///
+/// Note that the message is only formatted the first time, so the arguments
+/// should describe something that doesn't change between calls.
 macro_rules! log_once {
     ($msg:literal) => {{
         static LOG_ONCE: std::sync::Once = std::sync::Once::new();
         LOG_ONCE.call_once(|| {
             log!("{} [this log will only be shown once]", $msg);
+        });
+    }};
+    ($fmt:literal, $($arg:tt)+) => {{
+        static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+        LOG_ONCE.call_once(|| {
+            log!(
+                "{} [this log will only be shown once]",
+                format_args!($fmt, $($arg)+)
+            );
         });
     }};
 }
