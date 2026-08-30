@@ -21,8 +21,11 @@ pub mod ca_transform3d; // <-- НАШ НОВЫЙ МОДУЛЬ ДЛЯ ТРАНС�
 
 mod animation;
 mod composition;
+pub mod overlay;
 
-pub use composition::{recomposite_if_necessary, set_direct_present_active};
+pub use composition::{
+    is_direct_present_active, recomposite_if_necessary, set_direct_present_active,
+};
 
 use crate::abi::{impl_GuestRet_for_large_struct, GuestArg};
 use crate::dyld::{export_c_func, FunctionExports};
@@ -65,6 +68,10 @@ pub struct State {
     ca_media_timing_function: ca_media_timing_function::State,
     ca_transaction: ca_transaction::State,
     composition: composition::State,
+    /// Public so `-[EAGLContext presentRenderbuffer:]` can take it out for the
+    /// duration of its GL phase, when `Environment` as a whole is unavailable
+    /// but individual fields can still be reached through disjoint borrows.
+    pub overlay: overlay::State,
 }
 
 // This function should call mach_absolute_time() and convert the result into

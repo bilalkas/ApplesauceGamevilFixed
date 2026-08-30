@@ -1664,6 +1664,27 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         .borrow::<EAGLContextHostObject>(context)
         .drawable_framebuffer;
 
+    // Once we start presenting an EAGL layer directly, Core Animation
+    // composition is switched off for good (see `set_direct_present_active`),
+    // so nothing draws the app's UIKit content any more. Games that build part
+    // of their UI out of nibs and UIViews — Gamevil's Zenonia 3 does this for
+    // its splash logo, title menu and some in-game buttons — would otherwise
+    // end up with invisible but still tappable controls. Collect that content
+    // now, while `Environment` is still reachable; it gets drawn over the
+    // guest's frame further down, in the guest's own GL context.
+    let mut overlay_scene = if crate::frameworks::core_animation::overlay::is_enabled()
+        && crate::frameworks::core_animation::is_direct_present_active(env)
+    {
+        crate::frameworks::core_animation::overlay::collect(env)
+    } else {
+        None
+    };
+    // The overlay's GL objects have to be reachable while the guest context is
+    // current, which mutably borrows most of `Environment`. Take them out for
+    // the duration and put them back at the end.
+    let mut overlay_state =
+        std::mem::take(&mut env.framework_state.core_animation.overlay);
+
     let Some(gles_ctx) = super::get_thread_context(
         &mut env.framework_state.opengles,
         &mut env.objc,
@@ -1685,6 +1706,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         if let Some(window) = env.window.as_ref() {
             window.swap_window();
         }
+        env.framework_state.core_animation.overlay = overlay_state;
         return;
     };
 
@@ -1754,6 +1776,15 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         );
         std::mem::drop(gles_boxed);
         env.window.as_ref().unwrap().swap_window();
+        if overlay_scene.is_some() {
+            // TODO: the ES 2 presenter has no overlay support yet, so UIKit
+            //       content stays invisible on that path.
+            log_once!(
+                "Note: the OpenGL ES 2 presenter can't composite UIKit content over the \
+                 guest frame, so any UIKit-drawn UI will remain invisible."
+            );
+        }
+        env.framework_state.core_animation.overlay = overlay_state;
         return;
     }
 
@@ -2501,6 +2532,27 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         );
     }
 
+    // Draw the app's UIKit content (collected before the context was made
+    // current) on top of the frame we just presented. Nothing else will: Core
+    // Animation composition is off for the rest of the run.
+    if let Some(scene) = overlay_scene.as_mut() {
+        if crate::frameworks::core_animation::overlay::draw(gles, &mut overlay_state, scene) {
+            gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, drawable_framebuffer);
+            // The overlay texture is premultiplied RGBA and REPLACE passes its
+            // alpha straight through, which is what present_frame_overlay's
+            // blend expects.
+            gles.TexEnviv(
+                gles11::TEXTURE_ENV,
+                gles11::TEXTURE_ENV_MODE,
+                tex_env_mode_arr.as_ptr().cast(),
+            );
+            crate::gles::present::present_frame_overlay(gles, scene.viewport, scene.rotation);
+        }
+        static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        present_check(gles, trace_gl_errors, &SEEN, "after UIKit overlay draw");
+    }
+
     // Clean up the texture
     gles.DeleteTextures(1, &texture);
     {
@@ -2694,6 +2746,11 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         // unbounded number).
         while gles.GetError() != 0 {}
     }
+
+    // Release the context so `env` is usable again, and give the overlay
+    // compositor its GL objects back for the next frame.
+    std::mem::drop(gles_boxed);
+    env.framework_state.core_animation.overlay = overlay_state;
 }
 
 pub fn EAGLGetVersion(env: &mut Environment, major: MutPtr<u32>, minor: MutPtr<u32>) {

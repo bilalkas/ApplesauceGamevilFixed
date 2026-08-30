@@ -58,6 +58,19 @@ pub fn set_direct_present_active(env: &mut Environment) {
         .direct_present_active = true;
 }
 
+/// Whether [set_direct_present_active] has been called, i.e. an EAGL layer that
+/// this compositor would otherwise have been responsible for is being presented
+/// directly and nothing is drawing the rest of the UI.
+///
+/// Used by the UIKit overlay compositor (see [super::overlay]) to decide
+/// whether it needs to step in.
+pub fn is_direct_present_active(env: &Environment) -> bool {
+    env.framework_state
+        .core_animation
+        .composition
+        .direct_present_active
+}
+
 struct MiscGlObjects {
     /// Texture containing a single rounded corner.
     rounded_corner_texture: GLuint,
@@ -478,7 +491,7 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
 
 /// Call `displayIfNeeded` on all relevant layers in the tree, so their bitmaps
 /// are up to date before compositing.
-fn display_layers(env: &mut Environment, root_layer: id) {
+pub(super) fn display_layers(env: &mut Environment, root_layer: id) {
     // Tell layers to redraw themselves if needed.
 
     fn traverse(objc: &ObjC, layer: id, layers_needing_display: &mut Vec<id>) {

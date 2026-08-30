@@ -268,6 +268,7 @@ pub fn present_pixels(env: &mut Environment, layer: id, pixels: Vec<u8>, width: 
     let host_obj = env.objc.borrow_mut::<CALayerHostObject>(layer);
     host_obj.presented_pixels = Some((pixels, width, height));
     host_obj.gles_texture_is_up_to_date = false;
+    host_obj.content_epoch = host_obj.content_epoch.wrapping_add(1);
 }
 
 /// Returns whether the layer's backing store should be retained after

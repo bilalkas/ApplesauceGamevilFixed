@@ -997,28 +997,39 @@ fn path_for_resource_helper(
     }
 
     let name_str = ns_string::to_rust_string(env, name);
-    let lproj_str = if lproj == nil {
-        "<nil>".to_string()
-    } else {
-        ns_string::to_rust_string(env, lproj).into_owned()
-    };
-    let directory_str = if directory == nil {
-        "<nil>".to_string()
-    } else {
-        ns_string::to_rust_string(env, directory).into_owned()
-    };
-    let extension_str = if extension == nil {
-        "<nil>".to_string()
-    } else {
-        ns_string::to_rust_string(env, extension).into_owned()
-    };
-    log!(
-        "NSBundle lookup request: name={:?}, lproj={:?}, directory={:?}, extension={:?}",
-        name_str,
-        lproj_str,
-        directory_str,
-        extension_str
-    );
+    // Kept behind the debug flag, and with the argument conversions inside the
+    // check rather than in front of it. UIKit probes for a nib under every
+    // combination of name suffix (`~iphone`, `_iPad`, `-iPhone`, …) and
+    // localisation (`en`, `English`, `de`, `German`, `ja`, `Japanese`, `Base`,
+    // none), so Zenonia 3 gets through about a thousand of these before its
+    // first frame and several thousand over a session — enough to make this
+    // and the "resource lookup" line below roughly half of the entire log file.
+    // Each `log!` is two blocking writes on the main thread (see the note on
+    // `ENABLED_MODULES`), on top of three string allocations here.
+    if crate::log::ENABLED_MODULES.contains(&module_path!()) {
+        let lproj_str = if lproj == nil {
+            "<nil>".to_string()
+        } else {
+            ns_string::to_rust_string(env, lproj).into_owned()
+        };
+        let directory_str = if directory == nil {
+            "<nil>".to_string()
+        } else {
+            ns_string::to_rust_string(env, directory).into_owned()
+        };
+        let extension_str = if extension == nil {
+            "<nil>".to_string()
+        } else {
+            ns_string::to_rust_string(env, extension).into_owned()
+        };
+        log!(
+            "NSBundle lookup request: name={:?}, lproj={:?}, directory={:?}, extension={:?}",
+            name_str,
+            lproj_str,
+            directory_str,
+            extension_str
+        );
+    }
 
     let mut path: id = msg![env; bundle resourcePath];
     if lproj != nil {
@@ -1102,13 +1113,25 @@ fn path_for_resource_helper(
     let data_path: id = msg![env; data_path stringByAppendingPathComponent:name];
     let data_path_exists: bool = msg![env; file_manager fileExistsAtPath:data_path];
     let data_path_str = ns_string::to_rust_string(env, data_path);
-    log!(
+    // `fileExistsAtPath:` says nothing about whether the entry is a file rather
+    // than a directory, so it has to be confirmed with `is_file`. That used to
+    // be evaluated twice — once to format the log line, once for the branch —
+    // which meant a redundant filesystem lookup on every miss.
+    let data_path_exists = data_path_exists
+        && env
+            .fs
+            .is_file(crate::fs::GuestPath::new(data_path_str.as_ref()));
+    // Debug-only for the same reason as the "lookup request" line above: this
+    // fires on every miss, and the misses are the common case. Log the paths
+    // rather than the `NSString` pointers they used to print, which said
+    // nothing about which file was being looked for.
+    log_dbg!(
         "NSBundle resource lookup: {:?} missing, Unity Data fallback {:?} exists={}",
-        path,
-        data_path,
-        data_path_exists && env.fs.is_file(crate::fs::GuestPath::new(data_path_str.as_ref()))
+        path_str,
+        data_path_str,
+        data_path_exists
     );
-    if data_path_exists && env.fs.is_file(crate::fs::GuestPath::new(data_path_str.as_ref())) {
+    if data_path_exists {
         return data_path;
     }
 

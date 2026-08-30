@@ -77,6 +77,16 @@ pub(super) struct CALayerHostObject {
     pub(super) cg_context: Option<CGContextRef>,
     pub(super) gles_texture: Option<crate::gles::gles11_raw::types::GLuint>,
     pub(super) gles_texture_is_up_to_date: bool,
+    /// Bumped every time this layer's content (`contents`, its
+    /// `CGBitmapContext` backing store, or its presented renderbuffer pixels)
+    /// changes, i.e. everywhere `gles_texture_is_up_to_date` is cleared.
+    ///
+    /// The UIKit overlay compositor keeps its content textures in its own
+    /// state rather than here (see `overlay::State::textures`), because it runs
+    /// while `Environment` is unavailable and so can't write anything back to
+    /// the layer. Comparing epochs lets it tell a stale cached texture from a
+    /// fresh one without needing a per-layer flag it could clear itself.
+    pub(super) content_epoch: u64,
     pub(super) animations: HashMap<String, id>,
     pub(super) anonymous_animations: HashSet<id>,
     pub(super) name: Option<String>,
@@ -371,6 +381,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         cg_context: None,
         gles_texture: None,
         gles_texture_is_up_to_date: false,
+        content_epoch: 0,
         animations: HashMap::new(),
         anonymous_animations: HashSet::new(),
         name: None,
@@ -824,10 +835,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     let &mut CALayerHostObject {
         cg_context,
         ref mut gles_texture_is_up_to_date,
+        ref mut content_epoch,
         bounds: CGRect { origin, size },
         ..
     } = env.objc.borrow_mut(this);
     *gles_texture_is_up_to_date = false;
+    *content_epoch = content_epoch.wrapping_add(1);
 
     let int_width = size.width.round() as GuestUSize;
     let int_height = size.height.round() as GuestUSize;
@@ -863,6 +876,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())setContents:(id)new_contents {
     let host_obj = env.objc.borrow_mut::<CALayerHostObject>(this);
     host_obj.gles_texture_is_up_to_date = false;
+    host_obj.content_epoch = host_obj.content_epoch.wrapping_add(1);
     let old_contents = std::mem::replace(&mut host_obj.contents, new_contents);
     retain(env, new_contents);
     release(env, old_contents);
@@ -933,7 +947,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 // https://developer.apple.com/documentation/quartzcore/calayer/1410893-contentsrect
 - (())setContentsRect:(CGRect)rect {
     env.objc.borrow_mut::<CALayerHostObject>(this).contents_rect = rect;
-    env.objc.borrow_mut::<CALayerHostObject>(this).gles_texture_is_up_to_date = false;
+    let host_obj = env.objc.borrow_mut::<CALayerHostObject>(this);
+    host_obj.gles_texture_is_up_to_date = false;
+    host_obj.content_epoch = host_obj.content_epoch.wrapping_add(1);
 }
 - (CGRect)contentsRect {
     env.objc.borrow::<CALayerHostObject>(this).contents_rect

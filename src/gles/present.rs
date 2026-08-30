@@ -160,3 +160,84 @@ pub unsafe fn present_frame(
         gles.DrawArrays(gles11::TRIANGLES, 0, 6);
     }
 }
+
+/// Blend a transparent overlay — the UIKit layer tree composited by
+/// [crate::frameworks::core_animation::overlay] — over a frame that
+/// [present_frame] has already drawn.
+///
+/// This is [present_frame] minus the clear (which would wipe out the frame
+/// underneath) and minus the virtual cursor (already drawn), plus blending. The
+/// overlay is provided as a texture bound to `GL_TEXTURE_2D` whose colours are
+/// premultiplied by its alpha, and which is transparent everywhere the UI
+/// doesn't cover.
+///
+/// Because the rotation handling has to match [present_frame] exactly — and is
+/// easy to get subtly wrong — the two are deliberately kept as near-identical
+/// twins rather than being factored together with flags.
+///
+/// The provided context must be current, and its texture environment must pass
+/// the texture's alpha through (`GL_REPLACE`, or `GL_MODULATE` with a white
+/// current colour).
+pub unsafe fn present_frame_overlay(
+    gles: &mut dyn GLES,
+    viewport: (u32, u32, u32, u32),
+    rotation_matrix: Matrix<2>,
+) {
+    // See the note at the top of present_frame: this touches state that
+    // crate::frameworks::opengles::eagl::present_renderbuffer is responsible
+    // for backing up and restoring, so the two need to be updated in tandem.
+
+    use gles11::types::*;
+
+    gles.Viewport(
+        viewport.0 as _,
+        viewport.1 as _,
+        viewport.2 as _,
+        viewport.3 as _,
+    );
+    gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
+
+    let vertices: [f32; 12] = [
+        -1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0,
+    ];
+    gles.EnableClientState(gles11::VERTEX_ARRAY);
+    gles.VertexPointer(2, gles11::FLOAT, 0, vertices.as_ptr() as *const GLvoid);
+    let mut tex_coords: [f32; 12] = [
+        0.0, 0.0,
+        0.0, 1.0,
+        1.0, 0.0,
+        1.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+    ];
+    #[cfg(target_os = "ios")]
+    for coords in tex_coords.chunks_exact_mut(2) {
+        let transformed = rotation_matrix.transform([coords[0] - 0.5, coords[1] - 0.5]);
+        coords[0] = transformed[0] + 0.5;
+        coords[1] = transformed[1] + 0.5;
+    }
+    gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
+    gles.TexCoordPointer(2, gles11::FLOAT, 0, tex_coords.as_ptr() as *const GLvoid);
+    #[cfg(not(target_os = "ios"))]
+    {
+    // See present_frame for why the rotation is applied around (0.5, 0.5).
+    let r = Matrix::<4>::from(&rotation_matrix);
+    let to_center = Matrix::<4>::translate_3d(-0.5, -0.5, 0.0);
+    let from_center = Matrix::<4>::translate_3d(0.5, 0.5, 0.0);
+    let centered_rotation = to_center.multiply(&r).multiply(&from_center);
+    gles.MatrixMode(gles11::TEXTURE);
+    gles.LoadMatrixf(centered_rotation.columns().as_ptr() as *const _);
+    }
+    #[cfg(target_os = "ios")]
+    {
+    gles.MatrixMode(gles11::TEXTURE);
+    gles.LoadIdentity();
+    }
+    // The overlay is premultiplied, so this is a plain "over" composite.
+    gles.Enable(gles11::BLEND);
+    gles.BlendFunc(gles11::ONE, gles11::ONE_MINUS_SRC_ALPHA);
+    gles.Enable(gles11::TEXTURE_2D);
+    gles.DrawArrays(gles11::TRIANGLES, 0, 6);
+    // Leave the texture matrix as present_frame does.
+    gles.LoadIdentity();
+}
