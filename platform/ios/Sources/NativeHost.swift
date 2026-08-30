@@ -484,15 +484,6 @@ private final class GameLibrary: ObservableObject {
 }
 
 private final class GameControlsWindow: UIWindow {
-    weak var interactiveView: UIView?
-
-    /// Set while the exit confirmation alert is on screen. The alert is
-    /// presented by this window's root view controller, so its buttons and its
-    /// dimming view are *not* descendants of `interactiveView` and the filter
-    /// below would swallow every touch aimed at them. While a modal is up the
-    /// game must not receive touches anyway, so route everything to UIKit.
-    var routesAllTouchesToUI = false
-
     // Only `hitTest` may be overridden here. Overriding `point(inside:)` on a
     // UIWindow also changes how UIKit picks which window an event belongs to,
     // which stops *every* window in the scene (including the SDL game window)
@@ -502,11 +493,13 @@ private final class GameControlsWindow: UIWindow {
         guard let hitView = super.hitTest(point, with: event) else {
             return nil
         }
-        if routesAllTouchesToUI {
-            return hitView
-        }
-        guard let interactiveView,
-              hitView === interactiveView || hitView.isDescendant(of: interactiveView)
+        // Which view is live changes over time — the exit handle normally, the
+        // confirmation panel while that is up — so ask the controller instead
+        // of caching a view here. A stale reference in this window silently
+        // swallows every touch, which is exactly how the first attempt at the
+        // confirmation dialog ended up unusable.
+        guard let controls = rootViewController as? GameControlsViewController,
+              controls.shouldDeliverTouch(to: hitView)
         else {
             return nil
         }
@@ -716,34 +709,166 @@ private final class GameControlsViewController: UIViewController {
         presentExitConfirmation()
     }
 
-    private func presentExitConfirmation() {
-        guard presentedViewController == nil else { return }
-        cancelAutoRetract()
+    // MARK: Exit confirmation
+    //
+    // Built from plain views inside this controller's own hierarchy rather than
+    // with UIAlertController. The alert did show up, but none of its buttons
+    // ever responded: UIKit presents it into a transition view that is not a
+    // descendant of anything `GameControlsWindow.hitTest` recognises, and the
+    // run loop only turns once per frame, which is a poor place to rely on
+    // UIKit's presentation machinery. The exit handle works in exactly this
+    // hierarchy, so the confirmation panel lives here too.
 
-        let alert = UIAlertController(
-            title: "Exit Game?",
-            message: "The game will stop and you will return to your library. "
-                + "Anything it has not saved yet will be lost.",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "Keep Playing", style: .cancel) { [weak self] _ in
-            self?.setModalTouchRouting(enabled: false)
-            self?.setRevealed(false, animated: true)
-        })
-        alert.addAction(UIAlertAction(title: "Exit Game", style: .destructive) { [weak self] _ in
-            self?.setModalTouchRouting(enabled: false)
-            self?.exitButton.isEnabled = false
-            self?.onExit?()
-        })
+    private(set) var isShowingExitConfirmation = false
 
-        setModalTouchRouting(enabled: true)
-        present(alert, animated: true)
+    private lazy var confirmationOverlay: UIView = {
+        let overlay = UIView()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        overlay.alpha = 0
+
+        let panel = UIView()
+        panel.backgroundColor = .secondarySystemBackground
+        panel.layer.cornerRadius = 16
+        panel.layer.cornerCurve = .continuous
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(panel)
+
+        let title = UILabel()
+        title.text = "Exit Game?"
+        title.font = .preferredFont(forTextStyle: .headline)
+        title.textColor = .label
+        title.textAlignment = .center
+        title.numberOfLines = 0
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let message = UILabel()
+        message.text = "The game will stop and you will return to your library. "
+            + "Anything it has not saved yet will be lost."
+        message.font = .preferredFont(forTextStyle: .footnote)
+        message.textColor = .secondaryLabel
+        message.textAlignment = .center
+        message.numberOfLines = 0
+        message.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = UIStackView(arrangedSubviews: [
+            title,
+            message,
+            self.confirmationButton(
+                title: "Keep Playing",
+                tint: .label,
+                action: #selector(keepPlayingTapped)
+            ),
+            self.confirmationButton(
+                title: "Exit Game",
+                tint: .systemRed,
+                action: #selector(confirmExitTapped)
+            )
+        ])
+        stack.axis = .vertical
+        stack.spacing = 10
+        stack.setCustomSpacing(20, after: message)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(stack)
+
+        // High priority rather than required, so the two safe-area margins
+        // below win on a narrow screen instead of breaking.
+        let preferredWidth = panel.widthAnchor.constraint(equalToConstant: 300)
+        preferredWidth.priority = .defaultHigh
+
+        NSLayoutConstraint.activate([
+            panel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            panel.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
+            preferredWidth,
+            panel.leadingAnchor.constraint(
+                greaterThanOrEqualTo: overlay.safeAreaLayoutGuide.leadingAnchor,
+                constant: 24
+            ),
+            panel.trailingAnchor.constraint(
+                lessThanOrEqualTo: overlay.safeAreaLayoutGuide.trailingAnchor,
+                constant: -24
+            ),
+            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -20)
+        ])
+        return overlay
+    }()
+
+    private func confirmationButton(title: String, tint: UIColor, action: Selector) -> UIButton {
+        let button = UIButton(type: .system)
+        var configuration: UIButton.Configuration = .gray()
+        configuration.title = title
+        configuration.cornerStyle = .large
+        configuration.baseForegroundColor = tint
+        button.configuration = configuration
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        return button
     }
 
-    /// The alert lives in `GameControlsWindow`, whose hit-test filter otherwise
-    /// only lets the exit button through.
-    private func setModalTouchRouting(enabled: Bool) {
-        (view.window as? GameControlsWindow)?.routesAllTouchesToUI = enabled
+    private func presentExitConfirmation() {
+        guard !isShowingExitConfirmation else { return }
+        cancelAutoRetract()
+        isShowingExitConfirmation = true
+
+        let overlay = confirmationOverlay
+        // Autoresizing rather than constraints: the overlay is added and
+        // removed repeatedly, and a frame that follows `view.bounds` needs no
+        // constraints to be torn down and rebuilt each time.
+        overlay.frame = view.bounds
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(overlay)
+        view.layoutIfNeeded()
+
+        UIView.animate(withDuration: 0.2) {
+            overlay.alpha = 1
+        }
+    }
+
+    private func hideExitConfirmation() {
+        guard isShowingExitConfirmation else { return }
+        isShowingExitConfirmation = false
+
+        let overlay = confirmationOverlay
+        UIView.animate(
+            withDuration: 0.2,
+            animations: { overlay.alpha = 0 },
+            // Guarded in case the panel was brought back up while the fade was
+            // still running, which would otherwise tear down the live overlay.
+            completion: { [weak self] _ in
+                guard self?.isShowingExitConfirmation != true else { return }
+                overlay.removeFromSuperview()
+            }
+        )
+    }
+
+    @objc private func keepPlayingTapped() {
+        hideExitConfirmation()
+        setRevealed(false, animated: true)
+    }
+
+    @objc private func confirmExitTapped() {
+        // Torn down without the fade: the game is about to stop, and the
+        // animation's completion block would need another run loop turn that
+        // the emulator may no longer be around to provide.
+        isShowingExitConfirmation = false
+        confirmationOverlay.removeFromSuperview()
+        exitButton.isEnabled = false
+        onExit?()
+    }
+
+    /// Which touches `GameControlsWindow` should keep for UIKit instead of
+    /// passing through to the game underneath.
+    func shouldDeliverTouch(to hitView: UIView) -> Bool {
+        // The flag is checked first so a stray touch never instantiates the
+        // lazy overlay just to compare against it.
+        if isShowingExitConfirmation {
+            return hitView === confirmationOverlay
+                || hitView.isDescendant(of: confirmationOverlay)
+        }
+        return hitView === exitButton || hitView.isDescendant(of: exitButton)
     }
 
     private func setRevealed(_ revealed: Bool, animated: Bool) {
@@ -775,7 +900,7 @@ private final class GameControlsViewController: UIViewController {
     private func scheduleAutoRetract() {
         cancelAutoRetract()
         let timer = Timer(timeInterval: Self.autoRetractDelay, repeats: false) { [weak self] _ in
-            guard let self, self.presentedViewController == nil else { return }
+            guard let self, !self.isShowingExitConfirmation else { return }
             self.setRevealed(false, animated: true)
         }
         // The emulator owns the main thread and only lets the run loop turn
@@ -907,7 +1032,6 @@ final class TouchHLENativeHost: NSObject {
 
         controlsWindow.rootViewController = viewController
         viewController.loadViewIfNeeded()
-        controlsWindow.interactiveView = viewController.exitButton
         controlsWindow.isHidden = false
         gameControlsWindow = controlsWindow
 

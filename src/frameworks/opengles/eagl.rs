@@ -2088,6 +2088,25 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
             let elem_buffer = qi(gles, gles11::ELEMENT_ARRAY_BUFFER_BINDING);
             let clear_color = qf4(gles, gles11::COLOR_CLEAR_VALUE);
             let current_color = qf4(gles, gles11::CURRENT_COLOR);
+            // State that the present path has to neutralise but that is not a
+            // capability, so it does not show up anywhere else in this dump.
+            // The write mask in particular decides whether our own clear and
+            // quad can reach the window's framebuffer at all.
+            let color_mask = {
+                while gles.GetError() != 0 {}
+                let mut v: [GLboolean; 4] = [gles11::TRUE; 4];
+                gles.GetBooleanv(gles11::COLOR_WRITEMASK, v.as_mut_ptr());
+                while gles.GetError() != 0 {}
+                v
+            };
+            let scissor_on = qb(gles, gles11::SCISSOR_TEST);
+            let scissor_box = {
+                while gles.GetError() != 0 {}
+                let mut v: [GLint; 4] = [0; 4];
+                gles.GetIntegerv(gles11::SCISSOR_BOX, v.as_mut_ptr());
+                while gles.GetError() != 0 {}
+                v
+            };
             log!(
                 "[--trace-gl-errors] present_renderbuffer renderbuffer-content probe \
                  (frame={}, used_app_fbo={}, viewport={:?}, renderbuffer={}x{}): \
@@ -2098,7 +2117,9 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
                  BLEND={} (src=0x{:04x} dst=0x{:04x}) DEPTH_TEST={} ALPHA_TEST={} \
                  CULL_FACE={} TEXTURE_2D={} \
                  vertex_arr={} color_arr={} texcoord_arr={} \
-                 clear_color=({:.3},{:.3},{:.3},{:.3}) current_color=({:.3},{:.3},{:.3},{:.3})",
+                 clear_color=({:.3},{:.3},{:.3},{:.3}) current_color=({:.3},{:.3},{:.3},{:.3}) \
+                 color_writemask=({},{},{},{}) SCISSOR_TEST={} scissor_box={:?} \
+                 active_texture=0x{:04x} client_active_texture=0x{:04x} max_texture_units={}",
                 count,
                 used_app_fbo,
                 viewport,
@@ -2146,6 +2167,18 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
                 current_color[1],
                 current_color[2],
                 current_color[3],
+                color_mask[0],
+                color_mask[1],
+                color_mask[2],
+                color_mask[3],
+                scissor_on,
+                scissor_box,
+                // The two selectors have already been pinned to unit 0 by the
+                // time this probe runs, so report the values that were saved
+                // on entry — those are the ones the guest actually left.
+                old_active_texture,
+                old_client_active_texture,
+                texture_unit_count,
             );
         }
     }
@@ -2375,6 +2408,37 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         );
     }
 
+    // The colour write mask is not a capability, so the CAPABILITIES loop above
+    // does not cover it, and nothing else here was resetting it either. That
+    // means whatever mask the guest last set was still in force for our own
+    // present: neither present_frame's glClear nor its textured quad could
+    // write the masked channels of the window's framebuffer, so those channels
+    // kept whatever the back buffer held from its previous turn — with double
+    // buffering, the frame from two frames ago. The result is blocks of stale
+    // pixels and wrong colours on top of an otherwise correct picture, on
+    // exactly those frames whose last guest draw left a mask set, which is why
+    // it looks intermittent rather than constant.
+    //
+    // Engines set a partial mask more often than one might expect: masking
+    // alpha off (TRUE, TRUE, TRUE, FALSE) while compositing, or masking colour
+    // off entirely for a depth- or stencil-only pass.
+    let old_color_mask: [GLboolean; 4] = {
+        let mut mask = [gles11::TRUE; 4];
+        gles.GetBooleanv(gles11::COLOR_WRITEMASK, mask.as_mut_ptr());
+        mask
+    };
+    gles.ColorMask(gles11::TRUE, gles11::TRUE, gles11::TRUE, gles11::TRUE);
+    {
+        static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        present_check(
+            gles,
+            trace_gl_errors,
+            &SEEN,
+            "after color write mask save + open",
+        );
+    }
+
     // Back up other things that will be modified while drawing.
     let old_viewport: (GLint, GLint, GLsizei, GLsizei) = {
         let [x, y, width, height] = get_ints(gles, gles11::VIEWPORT);
@@ -2483,6 +2547,12 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         present_check(gles, trace_gl_errors, &SEEN, "after matrix pop+restore");
     }
     gles.Color4f(old_color[0], old_color[1], old_color[2], old_color[3]);
+    gles.ColorMask(
+        old_color_mask[0],
+        old_color_mask[1],
+        old_color_mask[2],
+        old_color_mask[3],
+    );
     gles.Viewport(
         old_viewport.0,
         old_viewport.1,
