@@ -41,11 +41,14 @@
 //!
 //! # Known limitations
 //!
+//! These are why the whole thing is opt-in (`--ui-overlay`) rather than on by
+//! default: an app it models badly ends up with its game picture covered or
+//! displaced, which is a worse result than the missing menu it set out to fix.
+//!
 //! * The guest frame is stretched across the whole screen by the direct
 //!   presenter, so anything the layer tree puts *behind* the `CAEAGLLayer` is
 //!   dropped rather than drawn (see [collect_layer]). An app that puts a small
-//!   GL view next to visible UIKit chrome will lose the chrome behind it;
-//!   `--no-ui-overlay` is the escape hatch.
+//!   GL view next to visible UIKit chrome will lose the chrome behind it.
 //! * `cornerRadius` and pattern backgrounds are drawn as plain rectangles
 //!   (the rounded-corner 9-patch lives in the other compositor's GL objects,
 //!   which belong to the internal context).
@@ -151,15 +154,21 @@ pub struct Scene {
 /// Whether the overlay compositor is enabled at all.
 ///
 /// It only makes sense on the iOS host (everywhere else Core Animation
-/// composition still runs). `--no-ui-overlay` turns it off per app, and
-/// `TOUCHHLE_DISABLE_UI_OVERLAY=1` does the same on hosts where environment
-/// variables can actually be set.
+/// composition still runs), and it is opt-in even there: `--ui-overlay` turns it
+/// on per app, and `TOUCHHLE_DISABLE_UI_OVERLAY=1` overrides that again on hosts
+/// where environment variables can actually be set.
 pub fn is_enabled(env: &Environment) -> bool {
     if !cfg!(target_os = "ios") {
         return false;
     }
     if !env.options.ui_overlay {
-        log_once!("--no-ui-overlay: not compositing UIKit content over the guest frame.");
+        // Worth a line in the log even though this is the default: an app whose
+        // menus are invisible but still respond to taps is exactly the symptom
+        // the overlay exists to fix, and nothing else points at the flag.
+        log_once!(
+            "Not compositing UIKit content over the guest frame. If this app's menus are \
+             invisible but still react to taps, try --ui-overlay."
+        );
         return false;
     }
     if std::env::var_os("TOUCHHLE_DISABLE_UI_OVERLAY").is_some() {

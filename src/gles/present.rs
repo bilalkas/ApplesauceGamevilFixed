@@ -173,7 +173,9 @@ pub unsafe fn present_frame(
 ///
 /// Because the rotation handling has to match [present_frame] exactly — and is
 /// easy to get subtly wrong — the two are deliberately kept as near-identical
-/// twins rather than being factored together with flags.
+/// twins rather than being factored together with flags. The one deliberate
+/// difference is the matrix reset below, which [present_frame] gets from its
+/// caller and this doesn't.
 ///
 /// The provided context must be current, and its texture environment must pass
 /// the texture's alpha through (`GL_REPLACE`, or `GL_MODULATE` with a white
@@ -196,6 +198,24 @@ pub unsafe fn present_frame_overlay(
         viewport.3 as _,
     );
     gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
+
+    // Unlike present_frame, which runs straight after present_renderbuffer has
+    // loaded an identity into all three matrix stacks, this runs *after*
+    // crate::frameworks::core_animation::overlay::draw, which needs its own
+    // projection (screen space to NDC) and a per-layer modelview to render the
+    // layer tree. Those are still loaded when we get here, so the quad below —
+    // whose vertices are already in normalized device co-ordinates — has to
+    // reset them or it gets transformed twice.
+    //
+    // Left unreset, the leftover modelview (whichever layer happened to be
+    // drawn last) plus that projection put the quad well outside the view
+    // volume, so all that survives clipping is a small displaced patch in one
+    // corner — and it moves every frame, because which layer is drawn last
+    // changes as the UI animates.
+    gles.MatrixMode(gles11::PROJECTION);
+    gles.LoadIdentity();
+    gles.MatrixMode(gles11::MODELVIEW);
+    gles.LoadIdentity();
 
     let vertices: [f32; 12] = [
         -1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0,

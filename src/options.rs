@@ -83,10 +83,14 @@ pub struct Options {
     ///
     /// Direct presentation switches Core Animation composition off for good, so
     /// without this the app's nib- and `UIView`-drawn chrome is never rendered,
-    /// only hit-tested. It is on by default for that reason, but it composites
-    /// a whole extra screen every frame and gets the geometry wrong for apps
-    /// that lay their UI out in ways this doesn't model, so
-    /// `--no-ui-overlay` turns it off per app.
+    /// only hit-tested — Zenonia 3's splash logo and title menu are invisible
+    /// but still tappable, for instance.
+    ///
+    /// It is nevertheless off by default: it composites a whole extra screen
+    /// every frame, and an app whose UI it doesn't model correctly ends up with
+    /// its game picture covered or displaced rather than merely missing a menu,
+    /// which is the worse failure of the two. `--ui-overlay` turns it on per
+    /// app.
     pub ui_overlay: bool,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
@@ -169,7 +173,7 @@ impl Default for Options {
             present_rotation_override: None,
             ios_es2_direct_present: false,
             ios_es1_direct_present: true,
-            ui_overlay: true,
+            ui_overlay: false,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
             deadzone: 0.1,
