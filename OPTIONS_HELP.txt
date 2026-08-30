@@ -349,6 +349,23 @@ Other options:
         If the picture appears rotated on the direct path, combine this with
         --present-rotation=.
 
+    --ui-overlay
+    --no-ui-overlay
+        (iOS host only.) Draw the app's UIKit content on top of a directly
+        presented renderbuffer.
+
+        Presenting directly switches the Core Animation compositor off for the
+        rest of the run, so anything the app draws with UIViews, nibs or
+        CALayers is never rendered — only hit-tested. Games that mix a GL world
+        with ordinary UIKit chrome (Zenonia 3 draws its splash logo, title menu
+        and some in-game buttons that way) end up with invisible but still
+        tappable controls.
+
+        On by default. It composites an extra screen's worth of layers every
+        frame, and apps whose UI layout this doesn't model correctly can end up
+        with misplaced or oversized chrome covering the game, so pass
+        --no-ui-overlay to switch it off per app.
+
     --prefer-gles2-context
         Force EAGL initWithAPI: to create an OpenGL ES 2.0 context even when
         the app requested an OpenGL ES 1.1 context.

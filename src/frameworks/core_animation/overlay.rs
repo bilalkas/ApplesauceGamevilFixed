@@ -41,9 +41,11 @@
 //!
 //! # Known limitations
 //!
-//! * UIKit content is always drawn *over* the guest frame, whatever the real
-//!   z-order in the layer tree is. In practice apps put their GL view at the
-//!   bottom, which is what this assumes.
+//! * The guest frame is stretched across the whole screen by the direct
+//!   presenter, so anything the layer tree puts *behind* the `CAEAGLLayer` is
+//!   dropped rather than drawn (see [collect_layer]). An app that puts a small
+//!   GL view next to visible UIKit chrome will lose the chrome behind it;
+//!   `--no-ui-overlay` is the escape hatch.
 //! * `cornerRadius` and pattern backgrounds are drawn as plain rectangles
 //!   (the rounded-corner 9-patch lives in the other compositor's GL objects,
 //!   which belong to the internal context).
@@ -61,7 +63,7 @@ use crate::gles::GLES;
 use crate::matrix::Matrix;
 use crate::objc::{id, msg, msg_class, nil, Class};
 use crate::Environment;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Vertex positions of a unit square in layer co-ordinates, ordered so that
 /// `GL_TRIANGLE_STRIP` produces the same two triangles as the other
@@ -149,10 +151,15 @@ pub struct Scene {
 /// Whether the overlay compositor is enabled at all.
 ///
 /// It only makes sense on the iOS host (everywhere else Core Animation
-/// composition still runs), and `TOUCHHLE_DISABLE_UI_OVERLAY=1` turns it off
-/// for A/B testing without a rebuild.
-pub fn is_enabled() -> bool {
+/// composition still runs). `--no-ui-overlay` turns it off per app, and
+/// `TOUCHHLE_DISABLE_UI_OVERLAY=1` does the same on hosts where environment
+/// variables can actually be set.
+pub fn is_enabled(env: &Environment) -> bool {
     if !cfg!(target_os = "ios") {
+        return false;
+    }
+    if !env.options.ui_overlay {
+        log_once!("--no-ui-overlay: not compositing UIKit content over the guest frame.");
         return false;
     }
     if std::env::var_os("TOUCHHLE_DISABLE_UI_OVERLAY").is_some() {
@@ -202,18 +209,9 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
         root_layers.push(layer);
     }
 
-    // The guest frame is already on screen underneath us, so every CAEAGLLayer
-    // — and every ancestor of one, i.e. the opaque UIWindow and root view that
-    // would otherwise paint over it — must not draw its own background or
-    // contents. Their sublayers are still drawn: that is exactly the UI we're
-    // here for.
     let eagl_class: Class = msg_class![env; CAEAGLLayer class];
-    let mut content_suppressed = HashSet::new();
-    for &root in &root_layers {
-        mark_eagl_chain(env, root, eagl_class, &mut content_suppressed);
-    }
-
     let mut animation_state = animation::State::default();
+    let mut found_eagl = false;
     let mut quads = Vec::new();
     // Assumes the windows in the list are ordered back-to-front, as the Core
     // Animation compositor does.
@@ -224,7 +222,8 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
             root,
             Matrix::<4>::identity(),
             1.0,
-            &content_suppressed,
+            eagl_class,
+            &mut found_eagl,
             &mut quads,
         );
     }
@@ -232,6 +231,20 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
 
     if quads.is_empty() {
         return None;
+    }
+
+    if !found_eagl {
+        // Without the guest's own layer to anchor on, there is no way to tell
+        // which of these layers UIKit would have drawn behind the game, so an
+        // opaque window or root-view background ends up painted over it. Draw
+        // them anyway — a missing menu is what this module exists to fix — but
+        // say so, because it makes `--no-ui-overlay` the right answer for this
+        // app.
+        log_once!(
+            "Warning: the UIKit overlay didn't find the presented CAEAGLLayer in the layer \
+             tree, so it can't tell which layers belong behind the game. If the picture ends \
+             up covered or shrunken, pass --no-ui-overlay for this app."
+        );
     }
 
     // The layer tree is in `UIScreen` bounds space, which is portrait even for
@@ -263,41 +276,102 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
         None => env.window().rotation_matrix(),
     };
 
+    let viewport = env.window().viewport();
+
     log_once!(
         "Compositing UIKit content over the directly-presented guest frame \
-         ({} layer(s) in the first frame). Set TOUCHHLE_DISABLE_UI_OVERLAY=1 to turn this off, \
-         or TOUCHHLE_UI_OVERLAY_ROTATION=<degrees> if it comes out rotated.",
+         ({} layer(s) in the first frame). Pass --no-ui-overlay to turn this off, \
+         or set TOUCHHLE_UI_OVERLAY_ROTATION=<degrees> if it comes out rotated.",
         quads.len()
     );
+    dump_once(env, &quads, screen_bounds, fb_size, viewport, rotation);
 
     Some(Scene {
         quads,
         screen_size: (screen_bounds.size.width, screen_bounds.size.height),
         fb_size,
-        viewport: env.window().viewport(),
+        viewport,
         rotation,
     })
 }
 
-/// Record every layer that is a `CAEAGLLayer` or an ancestor of one. Returns
-/// whether `layer`'s subtree (including itself) contains a `CAEAGLLayer`.
-fn mark_eagl_chain(
+/// Log the first frame's draw list, so a misplaced or oversized overlay can be
+/// diagnosed from a log alone. Only the first call does anything.
+fn dump_once(
     env: &mut Environment,
-    layer: id,
-    eagl_class: Class,
-    out: &mut HashSet<id>,
-) -> bool {
-    let mut contains: bool = msg![env; layer isKindOfClass:eagl_class];
-    let sublayers = env.objc.borrow::<CALayerHostObject>(layer).sublayers.clone();
-    for sublayer in sublayers {
-        if mark_eagl_chain(env, sublayer, eagl_class, out) {
-            contains = true;
+    quads: &[Quad],
+    screen_bounds: CGRect,
+    fb_size: (u32, u32),
+    viewport: (u32, u32, u32, u32),
+    rotation: Matrix<2>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DUMPED: AtomicBool = AtomicBool::new(false);
+    if DUMPED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    // Copied out because `CGRect` is `#[repr(C, packed)]`, and formatting
+    // macros take references to their arguments.
+    let (screen_w, screen_h) = (screen_bounds.size.width, screen_bounds.size.height);
+    let (screen_x, screen_y) = (screen_bounds.origin.x, screen_bounds.origin.y);
+    log!(
+        "UIKit overlay geometry: UIScreen {}x{} at ({}, {}), render target {}x{}, \
+         viewport {:?}, rotation {:?}",
+        screen_w,
+        screen_h,
+        screen_x,
+        screen_y,
+        fb_size.0,
+        fb_size.1,
+        viewport,
+        rotation.columns(),
+    );
+    for (i, quad) in quads.iter().enumerate() {
+        // The draw list is in screen space already, so transforming the unit
+        // square's corners gives the rectangle this quad actually covers.
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for [x, y] in [[0.0f32, 0.0f32], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]] {
+            let [x, y, _, _] = quad.modelview.transform([x, y, 0.0, 1.0]);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
         }
+
+        let layer = quad.layer;
+        let class: Class = msg![env; layer class];
+        let class_name = env.objc.get_class_name(class).to_string();
+        let content = match &quad.content {
+            None => "none".to_string(),
+            Some(content) => match &content.pixels {
+                Some((_, width, height)) => format!(
+                    "{}x{} {}, opacity {}",
+                    width,
+                    height,
+                    match content.source {
+                        ContentSource::Image => "image",
+                        ContentSource::Flipped => "flipped",
+                    },
+                    content.opacity
+                ),
+                None => "cached".to_string(),
+            },
+        };
+        log!(
+            "  #{} {} ({:?}): ({}, {}) to ({}, {}), background {:?}, content {}",
+            i,
+            class_name,
+            layer,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            quad.background,
+            content,
+        );
     }
-    if contains {
-        out.insert(layer);
-    }
-    contains
 }
 
 /// The equivalent of the Core Animation compositor's `composite_layer_recursive`,
@@ -308,7 +382,8 @@ fn collect_layer(
     layer: id,
     cumulative_transform: Matrix<4>,
     opacity: CGFloat,
-    content_suppressed: &HashSet<id>,
+    eagl_class: Class,
+    found_eagl: &mut bool,
     out: &mut Vec<Quad>,
 ) {
     // Building a presentation layer clones the whole host object, which for a
@@ -348,7 +423,20 @@ fn collect_layer(
     let cumulative_transform =
         <Matrix<4> as From<_>>::from(transform).multiply(&cumulative_transform);
 
-    if opacity > 0.0 && !content_suppressed.contains(&layer) {
+    // This is the layer the guest presents directly, so the frame it drew is
+    // already on screen, stretched across the whole viewport by the direct
+    // presenter. Everything the overlay has collected up to this point is
+    // therefore behind it and invisible — on a real device that's the app's
+    // opaque window and root view, which would otherwise cover the game
+    // completely. Throw it away.
+    //
+    // Sublayers are still collected afterwards, so UI the app puts *inside* its
+    // GL view keeps working, as do siblings drawn after it.
+    let is_eagl: bool = msg![env; layer isKindOfClass:eagl_class];
+    if is_eagl {
+        *found_eagl = true;
+        out.clear();
+    } else if opacity > 0.0 {
         // Reposition and scale the unit square (see SQUARE_POINTS) so it will
         // have the right size in this layer's co-ordinate space.
         let modelview =
@@ -396,7 +484,8 @@ fn collect_layer(
             sublayer,
             cumulative_transform,
             opacity,
-            content_suppressed,
+            eagl_class,
+            found_eagl,
             out,
         );
     }

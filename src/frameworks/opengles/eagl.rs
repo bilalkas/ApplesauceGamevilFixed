@@ -1672,7 +1672,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
     // end up with invisible but still tappable controls. Collect that content
     // now, while `Environment` is still reachable; it gets drawn over the
     // guest's frame further down, in the guest's own GL context.
-    let mut overlay_scene = if crate::frameworks::core_animation::overlay::is_enabled()
+    let mut overlay_scene = if crate::frameworks::core_animation::overlay::is_enabled(env)
         && crate::frameworks::core_animation::is_direct_present_active(env)
     {
         crate::frameworks::core_animation::overlay::collect(env)

@@ -78,6 +78,16 @@ pub struct Options {
     /// replaces displays nothing at all on iOS. Pass
     /// `--no-ios-es1-direct-present` to get the old behaviour back.
     pub ios_es1_direct_present: bool,
+    /// Draw the UIKit layer tree on top of a directly-presented `CAEAGLLayer`
+    /// (see [crate::frameworks::core_animation::overlay]).
+    ///
+    /// Direct presentation switches Core Animation composition off for good, so
+    /// without this the app's nib- and `UIView`-drawn chrome is never rendered,
+    /// only hit-tested. It is on by default for that reason, but it composites
+    /// a whole extra screen every frame and gets the geometry wrong for apps
+    /// that lay their UI out in ways this doesn't model, so
+    /// `--no-ui-overlay` turns it off per app.
+    pub ui_overlay: bool,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
     pub analog_stick_tilt_controls: bool,
@@ -159,6 +169,7 @@ impl Default for Options {
             present_rotation_override: None,
             ios_es2_direct_present: false,
             ios_es1_direct_present: true,
+            ui_overlay: true,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
             deadzone: 0.1,
@@ -223,6 +234,10 @@ impl Options {
             self.ios_es1_direct_present = true;
         } else if arg == "--no-ios-es1-direct-present" {
             self.ios_es1_direct_present = false;
+        } else if arg == "--ui-overlay" {
+            self.ui_overlay = true;
+        } else if arg == "--no-ui-overlay" {
+            self.ui_overlay = false;
         } else if let Some(value) = arg.strip_prefix("--present-rotation=") {
             self.present_rotation_override = if value == "auto" {
                 None
