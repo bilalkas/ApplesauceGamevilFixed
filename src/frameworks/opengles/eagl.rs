@@ -1791,6 +1791,73 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         }
     }
 
+    // OpenGL ES 1.1 keeps the texture enable bit, the bound texture, the
+    // texture environment and the texture-coordinate array *per texture unit*,
+    // selected with glActiveTexture / glClientActiveTexture. Every piece of
+    // texture state this function touches — the CopyTexImage2D destination
+    // below, the TexEnv REPLACE setup, present_frame's texcoord array, and the
+    // save/restore loops that bracket them — therefore silently operates on
+    // whichever unit the guest happened to leave selected.
+    //
+    // That falls apart for an app that uses multitexturing and calls
+    // -presentRenderbuffer: without resetting to unit 0 first, which the
+    // Gamevil titles do: the frame texture lands on unit 1 while unit 0 still
+    // has the guest's last texture bound and enabled, so stage 0 feeds leftover
+    // artwork — sampled at whatever stale coordinates that unit was left with —
+    // into the quad that is supposed to be showing the finished frame. The
+    // result is garbage pixels and wrong colours over an otherwise correct
+    // picture, appearing only on the frames whose last draw used more than one
+    // unit, which is why it looks intermittent.
+    //
+    // So pin both selectors to unit 0 and switch texturing off on every other
+    // unit for the duration of the present, then put all of it back.
+    const MAX_SAVED_TEXTURE_UNITS: usize = 8;
+    let old_active_texture: GLenum = get_int(gles, gles11::ACTIVE_TEXTURE) as _;
+    let old_client_active_texture: GLenum = get_int(gles, gles11::CLIENT_ACTIVE_TEXTURE) as _;
+    // A driver that doesn't recognise one of those enums leaves the value at 0,
+    // which is not a valid texture unit. Fall back to unit 0 so the restore at
+    // the end can't select something nonsensical.
+    let old_active_texture = if old_active_texture == 0 {
+        gles11::TEXTURE0
+    } else {
+        old_active_texture
+    };
+    let old_client_active_texture = if old_client_active_texture == 0 {
+        gles11::TEXTURE0
+    } else {
+        old_client_active_texture
+    };
+    // Same story for the unit count: 0 means "couldn't ask", and then we only
+    // pin unit 0 rather than also clearing the higher units. Fixed-function ES
+    // 1.1 drivers expose 2 to 8 units, so the cap costs nothing in practice.
+    let texture_unit_count = get_int(gles, gles11::MAX_TEXTURE_UNITS)
+        .clamp(1, MAX_SAVED_TEXTURE_UNITS as GLint) as usize;
+    let mut old_unit_texturing = [gles11::FALSE; MAX_SAVED_TEXTURE_UNITS];
+    let mut old_unit_texcoord_arrays = [gles11::FALSE; MAX_SAVED_TEXTURE_UNITS];
+    for unit in 1..texture_unit_count {
+        let unit_enum = gles11::TEXTURE0 + unit as GLenum;
+        gles.ActiveTexture(unit_enum);
+        gles.GetBooleanv(gles11::TEXTURE_2D, &mut old_unit_texturing[unit]);
+        gles.Disable(gles11::TEXTURE_2D);
+        gles.ClientActiveTexture(unit_enum);
+        gles.GetBooleanv(
+            gles11::TEXTURE_COORD_ARRAY,
+            &mut old_unit_texcoord_arrays[unit],
+        );
+        gles.DisableClientState(gles11::TEXTURE_COORD_ARRAY);
+    }
+    gles.ActiveTexture(gles11::TEXTURE0);
+    gles.ClientActiveTexture(gles11::TEXTURE0);
+    {
+        static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        present_check(gles, trace_gl_errors, &SEEN, "after texture-unit pinning");
+    }
+    // Drain when tracing is off too: a driver that reports more units than it
+    // will actually select, or that rejects CLIENT_ACTIVE_TEXTURE, must not
+    // leave an error behind for the guest's own glGetError to trip over.
+    while gles.GetError() != 0 {}
+
     // To avoid confusing the guest app, we need to be able to undo any
     // state changes we make.
     let old_framebuffer: GLuint = get_int(gles, gles11::FRAMEBUFFER_BINDING_OES) as _;
@@ -2500,6 +2567,31 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
             &SEEN,
             "after BindTexture + BindFramebufferOES restore",
         );
+    }
+
+    // Undo the texture-unit pinning done at the start of the present. The
+    // binding and texture-environment restores above already ran against unit
+    // 0, which is the unit they were saved from, so only the higher units and
+    // the two selectors are left to put back.
+    for unit in 1..texture_unit_count {
+        let unit_enum = gles11::TEXTURE0 + unit as GLenum;
+        gles.ActiveTexture(unit_enum);
+        match old_unit_texturing[unit] {
+            gles11::TRUE => gles.Enable(gles11::TEXTURE_2D),
+            _ => gles.Disable(gles11::TEXTURE_2D),
+        }
+        gles.ClientActiveTexture(unit_enum);
+        match old_unit_texcoord_arrays[unit] {
+            gles11::TRUE => gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY),
+            _ => gles.DisableClientState(gles11::TEXTURE_COORD_ARRAY),
+        }
+    }
+    gles.ActiveTexture(old_active_texture);
+    gles.ClientActiveTexture(old_client_active_texture);
+    {
+        static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+        present_check(gles, trace_gl_errors, &SEEN, "after texture-unit restore");
     }
 
     // (See the long comment above for why we no longer save/restore

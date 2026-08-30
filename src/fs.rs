@@ -31,6 +31,7 @@ pub use bundle::BundleData;
 
 use crate::fs::bundle::{IpaFile, IpaFileRef};
 use crate::paths;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -614,12 +615,24 @@ impl Seek for GuestFile {
     }
 }
 
+/// Maps a lowercased file name to the relative paths under some base directory
+/// that carry that name, ordered the way [Fs::find_file_by_name] wants to
+/// return them (shallowest first, ties broken by path).
+type NameIndex = HashMap<String, Vec<GuestPathBuf>>;
+
 /// The type that owns the guest filesystem and provides accessors for it.
 #[derive(Debug)]
 pub struct Fs {
     root: FsNode,
     working_directory: GuestPathBuf,
     home_directory: GuestPathBuf,
+    /// Lazily built lookup tables for [Fs::find_file_by_name], keyed by the
+    /// base directory that was searched. Dropped by [Fs::invalidate_name_index]
+    /// whenever the tree changes.
+    ///
+    /// `RefCell` because the lookup only has `&self`: it is reached from
+    /// `open()`, which already holds the environment borrowed immutably.
+    name_index: RefCell<HashMap<String, NameIndex>>,
 }
 impl Fs {
     /// Construct a filesystem containing a home directory for the app, its
@@ -838,6 +851,7 @@ impl Fs {
             root,
             working_directory,
             home_directory,
+            name_index: Default::default(),
         };
         assert!(fs.lookup_node(&bundle_guest_path).is_some());
         (fs, bundle_guest_path)
@@ -849,6 +863,7 @@ impl Fs {
             root: FsNode::dir(),
             working_directory: GuestPathBuf::from(String::new()),
             home_directory: GuestPathBuf::from(String::new()),
+            name_index: Default::default(),
         }
     }
 
@@ -1127,35 +1142,85 @@ impl Fs {
     /// though it lives in a bundle subdirectory (e.g. Zenonia 3's
     /// `com/light80x50.zt1`). It is a fallback: callers must try the exact
     /// path first.
+    ///
+    /// `open()` reaches this for *every* path it fails to resolve any other
+    /// way, and games probe for files that do not exist all the time (missing
+    /// saves, optional resources, per-language assets). Walking the whole
+    /// bundle each time — which is what this used to do, allocating a path
+    /// string per node and then sorting the lot — made those misses cost
+    /// O(bundle size) apiece; Advena spends minutes frozen on its logo doing
+    /// exactly that. So the walk now happens once and its result is kept as a
+    /// name lookup table.
     pub fn find_file_by_name<P: AsRef<GuestPath>>(
         &self,
         base: P,
         file_name: &str,
     ) -> Option<GuestPathBuf> {
         let base = base.as_ref();
-        let mut candidates: Vec<GuestPathBuf> = self
-            .enumerate_recursive(base)
-            .ok()?
-            .into_iter()
-            .filter(|relative| {
-                relative
-                    .file_name()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(file_name))
-            })
-            .collect();
-        // enumerate_recursive walks HashMaps, so order is not stable between
-        // runs. Prefer the shallowest match and break ties by name so the same
-        // request always resolves to the same file.
-        candidates.sort_by(|a, b| {
-            let depth = |p: &GuestPathBuf| p.as_str().matches('/').count();
-            depth(a)
-                .cmp(&depth(b))
-                .then_with(|| a.as_str().cmp(b.as_str()))
-        });
+        // Taken out of the cache rather than borrowed from it, so the RefCell
+        // is not still borrowed while `is_file` runs below. A name resolves to
+        // one or two paths in practice, so the clone is nothing next to the
+        // bundle walk it replaces.
+        let candidates = self.candidates_for_name(base, file_name)?;
         candidates
             .into_iter()
             .map(|relative| base.join(relative.as_str()))
+            // The index can still name a file that has since been deleted, so
+            // this check stays even though the index is dropped on every change
+            // to the tree.
             .find(|full| self.is_file(full))
+    }
+
+    /// The relative paths under `base` whose file name matches `file_name`,
+    /// building the name index first if this is the first lookup since the
+    /// filesystem last changed.
+    fn candidates_for_name(&self, base: &GuestPath, file_name: &str) -> Option<Vec<GuestPathBuf>> {
+        let mut cache = self.name_index.borrow_mut();
+        if !cache.contains_key(base.as_str()) {
+            let paths = self.enumerate_recursive(base).ok()?;
+            let mut index = NameIndex::new();
+            for relative in paths {
+                // `to_ascii_lowercase`, not `to_lowercase`: the matching this
+                // replaces used `eq_ignore_ascii_case`, and Unicode folding
+                // would quietly widen it.
+                let Some(key) = relative.file_name().map(str::to_ascii_lowercase) else {
+                    continue;
+                };
+                index.entry(key).or_default().push(relative);
+            }
+            // enumerate_recursive walks HashMaps, so order is not stable
+            // between runs. Prefer the shallowest match and break ties by name
+            // so the same request always resolves to the same file.
+            for candidates in index.values_mut() {
+                candidates.sort_by(|a, b| {
+                    let depth = |p: &GuestPathBuf| p.as_str().matches('/').count();
+                    depth(a)
+                        .cmp(&depth(b))
+                        .then_with(|| a.as_str().cmp(b.as_str()))
+                });
+            }
+            log_dbg!(
+                "Built name index for {:?}: {} distinct file names",
+                base,
+                index.len()
+            );
+            cache.insert(base.as_str().to_string(), index);
+        }
+        cache
+            .get(base.as_str())
+            .and_then(|index| index.get(&file_name.to_ascii_lowercase()))
+            .cloned()
+    }
+
+    /// Drop the [Fs::find_file_by_name] lookup tables because the tree they
+    /// describe has changed.
+    ///
+    /// Called by every method that can add, remove or rename a node:
+    /// [Fs::rename], [Fs::remove], [Fs::create_dir], [Fs::create_dir_all] and
+    /// [Fs::open_with_options] (which [Fs::write] goes through). A new one of
+    /// those needs a call here too.
+    fn invalidate_name_index(&mut self) {
+        self.name_index.get_mut().clear();
     }
 
     /// Like [std::fs::read] but for the guest filesystem.
@@ -1200,6 +1265,7 @@ impl Fs {
     // ИСПРАВЛЕНИЕ: ЧЕСТНАЯ РЕАЛИЗАЦИЯ ПЕРЕИМЕНОВАНИЯ 
     // Поддерживает и файлы, и директории, обновляет дерево VFS без паники
     pub fn rename<P: AsRef<GuestPath> + Copy>(&mut self, from: P, to: P) -> Result<(), ()> {
+        self.invalidate_name_index();
         let from_path = from.as_ref();
         let to_path = to.as_ref();
 
@@ -1281,6 +1347,15 @@ impl Fs {
         if (truncate || create) && !write && !append {
             log!("Warning: App tried to create/truncate file without write permissions. Forcing write = true.");
             write = true;
+        }
+
+        // Only a create can add a node to the tree, and the name index cares
+        // about nothing else — not truncation, not writes. This matters: every
+        // single open() the guest makes lands here, so invalidating
+        // unconditionally would rebuild the index constantly and cost more than
+        // it saves.
+        if create {
+            self.invalidate_name_index();
         }
 
         let path = path.as_ref();
@@ -1391,6 +1466,7 @@ impl Fs {
     /// If the node is a directory, it must be
     /// empty.
     pub fn remove<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), FsError> {
+        self.invalidate_name_index();
         let path = path.as_ref();
         let (parent_node, node_name) = self
             .lookup_parent_node(path)
@@ -1467,6 +1543,7 @@ impl Fs {
 
     /// Like [std::fs::create_dir_all] but for the guest filesystem.
     pub fn create_dir_all<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), FsError> {
+        self.invalidate_name_index();
         let path = path.as_ref();
 
         // 1. Получаем компоненты пути.
@@ -1502,6 +1579,7 @@ impl Fs {
 
     /// Like [std::fs::create_dir] but for the guest filesystem.
     pub fn create_dir<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), FsError> {
+        self.invalidate_name_index();
         let path = path.as_ref();
         let (parent_node, new_dir_name) = self
             .lookup_parent_node(path)

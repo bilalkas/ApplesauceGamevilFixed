@@ -486,14 +486,26 @@ private final class GameLibrary: ObservableObject {
 private final class GameControlsWindow: UIWindow {
     weak var interactiveView: UIView?
 
+    /// Set while the exit confirmation alert is on screen. The alert is
+    /// presented by this window's root view controller, so its buttons and its
+    /// dimming view are *not* descendants of `interactiveView` and the filter
+    /// below would swallow every touch aimed at them. While a modal is up the
+    /// game must not receive touches anyway, so route everything to UIKit.
+    var routesAllTouchesToUI = false
+
     // Only `hitTest` may be overridden here. Overriding `point(inside:)` on a
     // UIWindow also changes how UIKit picks which window an event belongs to,
     // which stops *every* window in the scene (including the SDL game window)
     // from receiving touches. Letting `super.hitTest` do the work and merely
     // filtering the result keeps the pass-through behaviour without that.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard let hitView = super.hitTest(point, with: event),
-              let interactiveView,
+        guard let hitView = super.hitTest(point, with: event) else {
+            return nil
+        }
+        if routesAllTouchesToUI {
+            return hitView
+        }
+        guard let interactiveView,
               hitView === interactiveView || hitView.isDescendant(of: interactiveView)
         else {
             return nil
@@ -505,6 +517,46 @@ private final class GameControlsWindow: UIWindow {
 private final class GameControlsViewController: UIViewController {
     var allowedOrientations: UIInterfaceOrientationMask = .portrait
     var onExit: (() -> Void)?
+
+    // MARK: - Exit handle
+    //
+    // The exit button used to sit fully visible in the top-right corner, where
+    // it covered the game's own UI and a stray tap dropped you straight back to
+    // the library. It now rests as a sliver against the trailing edge: only
+    // `handleSize - retractedInset` points of it are on screen, it has to be
+    // dragged out before a tap does anything, and that tap then asks for
+    // confirmation. Dragging also moves it vertically, so it can be parked
+    // clear of whatever the game draws in that corner; the position is
+    // remembered across launches.
+
+    private static let handleSize: CGFloat = 48
+    /// How far the button hangs off the trailing edge when it is put away.
+    private static let retractedInset: CGFloat = 34
+    /// Margin between the button and the trailing edge once it is pulled out.
+    private static let revealedInset: CGFloat = -16
+    private static var handleTravel: CGFloat { retractedInset - revealedInset }
+    /// Fraction of `handleTravel` the button must be dragged to stay out.
+    private static let revealFraction: CGFloat = 0.5
+    private static let retractedAlpha: CGFloat = 0.4
+    /// Idle time after which a revealed button puts itself away again.
+    private static let autoRetractDelay: TimeInterval = 5
+    private static let verticalOffsetKey = "exitHandleVerticalOffset"
+    private static let defaultVerticalOffset: CGFloat = 10
+
+    private static var storedVerticalOffset: CGFloat {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: verticalOffsetKey) != nil else {
+            return defaultVerticalOffset
+        }
+        return CGFloat(defaults.double(forKey: verticalOffsetKey))
+    }
+
+    private var handleTrailingConstraint: NSLayoutConstraint!
+    private var handleTopConstraint: NSLayoutConstraint!
+    private var isRevealed = true
+    private var panStartInset: CGFloat = 0
+    private var panStartOffset: CGFloat = 0
+    private var retractTimer: Timer?
 
     private(set) lazy var exitButton: UIButton = {
         let button = UIButton(type: .system)
@@ -524,9 +576,13 @@ private final class GameControlsViewController: UIViewController {
         button.configuration = configuration
         button.tintColor = .systemRed
         button.accessibilityLabel = "Exit Game"
-        button.accessibilityHint = "Stops the game and returns to your library"
-        button.addTarget(self, action: #selector(exitGame), for: .touchUpInside)
+        button.accessibilityHint =
+            "Drag away from the edge of the screen, then tap and confirm to stop the game"
+        button.addTarget(self, action: #selector(exitButtonTapped), for: .touchUpInside)
         button.translatesAutoresizingMaskIntoConstraints = false
+        button.addGestureRecognizer(
+            UIPanGestureRecognizer(target: self, action: #selector(handlePan))
+        )
         return button
     }()
 
@@ -559,20 +615,41 @@ private final class GameControlsViewController: UIViewController {
         view.backgroundColor = .clear
         view.addSubview(exitButton)
 
+        handleTrailingConstraint = exitButton.trailingAnchor.constraint(
+            equalTo: view.trailingAnchor,
+            constant: Self.revealedInset
+        )
+        handleTopConstraint = exitButton.topAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.topAnchor,
+            constant: Self.storedVerticalOffset
+        )
         NSLayoutConstraint.activate([
-            exitButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
-            exitButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            exitButton.widthAnchor.constraint(equalToConstant: 48),
-            exitButton.heightAnchor.constraint(equalToConstant: 48)
+            handleTopConstraint,
+            handleTrailingConstraint,
+            exitButton.widthAnchor.constraint(equalToConstant: Self.handleSize),
+            exitButton.heightAnchor.constraint(equalToConstant: Self.handleSize)
         ])
+
+        // Start out visible so the control is discoverable, then put itself
+        // away once the player has had a chance to see it.
+        scheduleAutoRetract()
 
         guard UserDefaults.standard.bool(forKey: "showFPSOverlay") else { return }
 
         view.addSubview(fpsIndicator)
+        // Anchored independently of the exit handle: the handle moves when it
+        // is dragged, and the FPS pill dragging along with it would be odd.
+        // The trailing inset keeps it clear of the retracted handle's sliver.
         NSLayoutConstraint.activate([
-            fpsIndicator.centerYAnchor.constraint(equalTo: exitButton.centerYAnchor),
-            fpsIndicator.trailingAnchor.constraint(equalTo: exitButton.leadingAnchor, constant: -8),
-            fpsIndicator.heightAnchor.constraint(equalToConstant: 48)
+            fpsIndicator.topAnchor.constraint(
+                equalTo: view.safeAreaLayoutGuide.topAnchor,
+                constant: Self.defaultVerticalOffset
+            ),
+            fpsIndicator.trailingAnchor.constraint(
+                equalTo: view.trailingAnchor,
+                constant: -(Self.handleSize - Self.retractedInset) - 10
+            ),
+            fpsIndicator.heightAnchor.constraint(equalToConstant: Self.handleSize)
         ])
 
         updateFPS()
@@ -586,13 +663,144 @@ private final class GameControlsViewController: UIViewController {
         RunLoop.main.add(fpsTimer!, forMode: .common)
     }
 
-    deinit {
-        fpsTimer?.invalidate()
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // A rotation or a safe-area change can leave a remembered offset
+        // pointing off the bottom of the screen.
+        let clamped = clampedVerticalOffset(handleTopConstraint.constant)
+        if clamped != handleTopConstraint.constant {
+            handleTopConstraint.constant = clamped
+        }
     }
 
-    @objc private func exitGame() {
-        exitButton.isEnabled = false
-        onExit?()
+    deinit {
+        fpsTimer?.invalidate()
+        retractTimer?.invalidate()
+    }
+
+    // MARK: Handle interaction
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: view)
+
+        switch gesture.state {
+        case .began:
+            cancelAutoRetract()
+            panStartInset = handleTrailingConstraint.constant
+            panStartOffset = handleTopConstraint.constant
+        case .changed:
+            let inset = min(
+                Self.retractedInset,
+                max(Self.revealedInset, panStartInset + translation.x)
+            )
+            handleTrailingConstraint.constant = inset
+            handleTopConstraint.constant = clampedVerticalOffset(panStartOffset + translation.y)
+            let progress = min(max((Self.retractedInset - inset) / Self.handleTravel, 0), 1)
+            exitButton.alpha = Self.retractedAlpha + (1 - Self.retractedAlpha) * progress
+        case .ended, .cancelled, .failed:
+            let pulledOut = Self.retractedInset - handleTrailingConstraint.constant
+            setRevealed(pulledOut >= Self.handleTravel * Self.revealFraction, animated: true)
+            persistVerticalOffset()
+        default:
+            break
+        }
+    }
+
+    @objc private func exitButtonTapped() {
+        // Exiting always takes a deliberate drag first: while the handle is
+        // put away, a tap only pulls it out.
+        guard isRevealed else {
+            setRevealed(true, animated: true)
+            return
+        }
+        presentExitConfirmation()
+    }
+
+    private func presentExitConfirmation() {
+        guard presentedViewController == nil else { return }
+        cancelAutoRetract()
+
+        let alert = UIAlertController(
+            title: "Exit Game?",
+            message: "The game will stop and you will return to your library. "
+                + "Anything it has not saved yet will be lost.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Keep Playing", style: .cancel) { [weak self] _ in
+            self?.setModalTouchRouting(enabled: false)
+            self?.setRevealed(false, animated: true)
+        })
+        alert.addAction(UIAlertAction(title: "Exit Game", style: .destructive) { [weak self] _ in
+            self?.setModalTouchRouting(enabled: false)
+            self?.exitButton.isEnabled = false
+            self?.onExit?()
+        })
+
+        setModalTouchRouting(enabled: true)
+        present(alert, animated: true)
+    }
+
+    /// The alert lives in `GameControlsWindow`, whose hit-test filter otherwise
+    /// only lets the exit button through.
+    private func setModalTouchRouting(enabled: Bool) {
+        (view.window as? GameControlsWindow)?.routesAllTouchesToUI = enabled
+    }
+
+    private func setRevealed(_ revealed: Bool, animated: Bool) {
+        isRevealed = revealed
+        handleTrailingConstraint.constant = revealed ? Self.revealedInset : Self.retractedInset
+
+        let apply = {
+            self.exitButton.alpha = revealed ? 1 : Self.retractedAlpha
+            self.view.layoutIfNeeded()
+        }
+        if animated {
+            UIView.animate(
+                withDuration: 0.25,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseOut],
+                animations: apply
+            )
+        } else {
+            apply()
+        }
+
+        if revealed {
+            scheduleAutoRetract()
+        } else {
+            cancelAutoRetract()
+        }
+    }
+
+    private func scheduleAutoRetract() {
+        cancelAutoRetract()
+        let timer = Timer(timeInterval: Self.autoRetractDelay, repeats: false) { [weak self] _ in
+            guard let self, self.presentedViewController == nil else { return }
+            self.setRevealed(false, animated: true)
+        }
+        // The emulator owns the main thread and only lets the run loop turn
+        // once per frame via SDL's event pump, so the timer has to be in the
+        // common modes to fire while the game is running.
+        RunLoop.main.add(timer, forMode: .common)
+        retractTimer = timer
+    }
+
+    private func cancelAutoRetract() {
+        retractTimer?.invalidate()
+        retractTimer = nil
+    }
+
+    private func clampedVerticalOffset(_ offset: CGFloat) -> CGFloat {
+        let available = view.safeAreaLayoutGuide.layoutFrame.height - Self.handleSize
+        guard available > 0 else { return max(0, offset) }
+        return min(max(0, offset), available)
+    }
+
+    private func persistVerticalOffset() {
+        UserDefaults.standard.set(
+            Double(handleTopConstraint.constant),
+            forKey: Self.verticalOffsetKey
+        )
     }
 
     @objc private func updateFPS() {
