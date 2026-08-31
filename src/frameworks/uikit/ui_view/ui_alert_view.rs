@@ -3,22 +3,44 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-//! `UIAlertView` — shows an SDL2 message box dialog.
+//! `UIAlertView` — presented as an in-app dialog built from `UIView`s.
+//!
+//! This used to open a blocking SDL2 message box. That is wrong twice over.
+//! Semantically, `-[UIAlertView show]` returns immediately on iOS and the alert
+//! is dismissed later from a button tap, so blocking stops the guest's run loop
+//! dead. Practically, SDL's iOS message box spins a nested `NSRunLoop` on the
+//! very thread that drives the emulator, which re-enters the guest and kills the
+//! process — Advena's "Receive 3,000 VENA POINTS for leaving your rating!"
+//! prompt did exactly that. Building the dialog out of ordinary views keeps it
+//! inside the emulator, where the compositor already draws and hit-tests it.
 
+use super::ui_control::ui_button::UIButtonTypeCustom;
+use super::ui_control::{UIControlEventTouchUpInside, UIControlStateNormal};
 use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
-use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
+use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::{ns_string, NSInteger, NSUInteger};
+use crate::frameworks::uikit::ui_font::{UILineBreakModeWordWrap, UITextAlignmentCenter};
 use crate::objc::{
     id, msg, msg_class, msg_super, nil, objc_classes, release, retain, ClassExports, HostObject,
-    NSZonePtr,
+    NSZonePtr, SEL,
 };
-use crate::window;
+use crate::Environment;
 
 pub type UIAlertViewStyle = NSInteger;
 pub const UIAlertViewStyleDefault: UIAlertViewStyle = 0;
 pub const UIAlertViewStyleSecureTextInput: UIAlertViewStyle = 1;
 pub const UIAlertViewStylePlainTextInput: UIAlertViewStyle = 2;
 pub const UIAlertViewStyleLoginAndPasswordInput: UIAlertViewStyle = 3;
+
+/// Padding around the dialog's contents, and between them.
+const MARGIN: CGFloat = 12.0;
+/// Gap between adjacent buttons.
+const GAP: CGFloat = 8.0;
+/// Height of one button. Matches the 44pt minimum touch target UIKit uses.
+const BUTTON_HEIGHT: CGFloat = 44.0;
+/// Widest the dialog is allowed to get. Real `UIAlertView` is 284pt wide on the
+/// 320pt screens these games run at, so this keeps a familiar proportion.
+const MAX_WIDTH: CGFloat = 280.0;
 
 #[derive(Default)]
 pub struct UIAlertViewHostObject {
@@ -30,8 +52,278 @@ pub struct UIAlertViewHostObject {
     visible: bool,
     alert_view_style: UIAlertViewStyle,
     tag: NSInteger,
+    /// The view hierarchy put on the key window by `-show`, or `nil` when the
+    /// alert isn't on screen. This is a retained reference, released on
+    /// dismissal (see [dismiss_container]).
+    container: id,
 }
 impl HostObject for UIAlertViewHostObject {}
+
+fn rgba(env: &mut Environment, r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat) -> id {
+    msg_class![env; UIColor colorWithRed:r green:g blue:b alpha:a]
+}
+
+/// Create a centred white label `width` points wide, and report the height its
+/// text needs. The caller positions it with `-setFrame:`.
+fn make_label(
+    env: &mut Environment,
+    text: id,
+    font_size: CGFloat,
+    bold: bool,
+    width: CGFloat,
+) -> (id, CGFloat) {
+    let font: id = if bold {
+        msg_class![env; UIFont boldSystemFontOfSize:font_size]
+    } else {
+        msg_class![env; UIFont systemFontOfSize:font_size]
+    };
+
+    let frame = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width,
+            height: 0.0,
+        },
+    };
+    let label: id = msg_class![env; UILabel alloc];
+    let label: id = msg![env; label initWithFrame:frame];
+
+    let white: id = msg_class![env; UIColor whiteColor];
+    let clear: id = msg_class![env; UIColor clearColor];
+    let unlimited_lines: NSInteger = 0;
+    () = msg![env; label setFont:font];
+    () = msg![env; label setTextColor:white];
+    () = msg![env; label setBackgroundColor:clear];
+    () = msg![env; label setNumberOfLines:unlimited_lines];
+    () = msg![env; label setLineBreakMode:UILineBreakModeWordWrap];
+    () = msg![env; label setTextAlignment:UITextAlignmentCenter];
+    () = msg![env; label setText:text];
+
+    // Measured after the text is set, since that is what determines the height.
+    let constraint = CGSize {
+        width,
+        height: CGFloat::MAX,
+    };
+    let fitted: CGSize = msg![env; label sizeThatFits:constraint];
+    let height = fitted.height;
+    (label, height.max(0.0).ceil())
+}
+
+/// Create a button that reports `index` back to `alert` when tapped.
+///
+/// `-buttonWithType:` hands back an autoreleased button, so the caller must not
+/// release it: `-addSubview:` takes the reference that keeps it alive.
+fn make_button(
+    env: &mut Environment,
+    title: id,
+    index: NSInteger,
+    alert: id,
+    action: SEL,
+) -> id {
+    let button: id = msg_class![env; UIButton buttonWithType:UIButtonTypeCustom];
+    let white: id = msg_class![env; UIColor whiteColor];
+    let background = rgba(env, 0.24, 0.26, 0.32, 1.0);
+    () = msg![env; button setTitle:title forState:UIControlStateNormal];
+    () = msg![env; button setTitleColor:white forState:UIControlStateNormal];
+    () = msg![env; button setBackgroundColor:background];
+    () = msg![env; button setTag:index];
+    () = msg![env; button addTarget:alert
+                             action:action
+                   forControlEvents:UIControlEventTouchUpInside];
+    button
+}
+
+/// Take down the on-screen dialog, if there is one.
+fn dismiss_container(env: &mut Environment, this: id) {
+    // Cleared in the host object first: `-removeFromSuperview` drops the
+    // window's reference and the `release` below drops ours, after which the
+    // pointer must not be read again.
+    let container = std::mem::replace(
+        &mut env.objc.borrow_mut::<UIAlertViewHostObject>(this).container,
+        nil,
+    );
+    if container == nil {
+        return;
+    }
+    () = msg![env; container removeFromSuperview];
+    release(env, container);
+}
+
+/// Build the dialog and put it on the key window.
+///
+/// Returns `false` when there is no window to attach to, which tells `-show` to
+/// dismiss the alert instead of leaving the guest waiting for a tap that can
+/// never arrive.
+fn present(env: &mut Environment, this: id) -> bool {
+    let app: id = msg_class![env; UIApplication sharedApplication];
+    if app == nil {
+        return false;
+    }
+    let window: id = msg![env; app keyWindow];
+    if window == nil {
+        return false;
+    }
+
+    // `CGRect` is `#[repr(C, packed)]`, so its fields are copied into locals
+    // before being used in arithmetic.
+    let window_bounds: CGRect = msg![env; window bounds];
+    let screen_width = window_bounds.size.width;
+    let screen_height = window_bounds.size.height;
+    if screen_width <= 0.0 || screen_height <= 0.0 {
+        return false;
+    }
+
+    // A second `-show` without a dismissal in between would otherwise strand
+    // the first dialog on the window forever.
+    dismiss_container(env, this);
+
+    let (title, message, buttons) = {
+        let host = env.objc.borrow::<UIAlertViewHostObject>(this);
+        (host.title, host.message, host.button_titles)
+    };
+
+    let panel_width = (screen_width - 2.0 * MARGIN).min(MAX_WIDTH);
+    let text_width = panel_width - 2.0 * MARGIN;
+
+    // The contents are measured before anything is positioned, because the
+    // panel's height is whatever the wrapped text turned out to need.
+    let mut content_height = MARGIN;
+    let title_label = if title == nil {
+        nil
+    } else {
+        let (label, height) = make_label(env, title, 17.0, true, text_width);
+        let frame = CGRect {
+            origin: CGPoint {
+                x: MARGIN,
+                y: content_height,
+            },
+            size: CGSize {
+                width: text_width,
+                height,
+            },
+        };
+        () = msg![env; label setFrame:frame];
+        content_height += height + MARGIN;
+        label
+    };
+    let message_label = if message == nil {
+        nil
+    } else {
+        let (label, height) = make_label(env, message, 14.0, false, text_width);
+        let frame = CGRect {
+            origin: CGPoint {
+                x: MARGIN,
+                y: content_height,
+            },
+            size: CGSize {
+                width: text_width,
+                height,
+            },
+        };
+        () = msg![env; label setFrame:frame];
+        content_height += height + MARGIN;
+        label
+    };
+
+    // Two buttons sit side by side, as UIKit lays them out; any other count
+    // gets a column, which is also what UIKit falls back to.
+    let button_count: NSUInteger = msg![env; buttons count];
+    let side_by_side = button_count == 2;
+    let buttons_height = if button_count == 0 {
+        0.0
+    } else if side_by_side {
+        BUTTON_HEIGHT
+    } else {
+        BUTTON_HEIGHT * (button_count as CGFloat) + GAP * ((button_count - 1) as CGFloat)
+    };
+    let panel_height = content_height + buttons_height + MARGIN;
+
+    let container: id = msg_class![env; UIView alloc];
+    let container_frame = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: screen_width,
+            height: screen_height,
+        },
+    };
+    let container: id = msg![env; container initWithFrame:container_frame];
+    // The backdrop dims the game and, being a full-screen view, swallows the
+    // touches that would otherwise reach it — which is what makes this modal.
+    let dim = rgba(env, 0.0, 0.0, 0.0, 0.55);
+    () = msg![env; container setBackgroundColor:dim];
+
+    let panel: id = msg_class![env; UIView alloc];
+    let panel_frame = CGRect {
+        origin: CGPoint {
+            x: ((screen_width - panel_width) / 2.0).round(),
+            y: ((screen_height - panel_height) / 2.0).max(MARGIN).round(),
+        },
+        size: CGSize {
+            width: panel_width,
+            height: panel_height,
+        },
+    };
+    let panel: id = msg![env; panel initWithFrame:panel_frame];
+    let panel_background = rgba(env, 0.13, 0.14, 0.17, 0.98);
+    let corner_radius: CGFloat = 10.0;
+    () = msg![env; panel setBackgroundColor:panel_background];
+    let panel_layer: id = msg![env; panel layer];
+    () = msg![env; panel_layer setCornerRadius:corner_radius];
+    () = msg![env; container addSubview:panel];
+
+    // `-addSubview:` retains, so the `alloc` reference is handed over here.
+    if title_label != nil {
+        () = msg![env; panel addSubview:title_label];
+        release(env, title_label);
+    }
+    if message_label != nil {
+        () = msg![env; panel addSubview:message_label];
+        release(env, message_label);
+    }
+
+    let action = env
+        .objc
+        .register_host_selector("touchHLEAlertButtonTapped:".to_string(), &mut env.mem);
+    let usable_width = panel_width - 2.0 * MARGIN;
+    let half_width = ((usable_width - GAP) / 2.0).floor();
+    for i in 0..button_count {
+        let button_title: id = msg![env; buttons objectAtIndex:i];
+        let button = make_button(env, button_title, i as NSInteger, this, action);
+        let frame = if side_by_side {
+            CGRect {
+                origin: CGPoint {
+                    x: MARGIN + (half_width + GAP) * (i as CGFloat),
+                    y: content_height,
+                },
+                size: CGSize {
+                    width: half_width,
+                    height: BUTTON_HEIGHT,
+                },
+            }
+        } else {
+            CGRect {
+                origin: CGPoint {
+                    x: MARGIN,
+                    y: content_height + (BUTTON_HEIGHT + GAP) * (i as CGFloat),
+                },
+                size: CGSize {
+                    width: usable_width,
+                    height: BUTTON_HEIGHT,
+                },
+            }
+        };
+        () = msg![env; button setFrame:frame];
+        () = msg![env; panel addSubview:button];
+    }
+    release(env, panel);
+
+    () = msg![env; window addSubview:container];
+    () = msg![env; window bringSubviewToFront:container];
+    // Ours to keep: the window holds its own reference, and this one is what
+    // lets `-dismissWithClickedButtonIndex:animated:` find the dialog again.
+    env.objc.borrow_mut::<UIAlertViewHostObject>(this).container = container;
+    true
+}
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -49,6 +341,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         visible:             false,
         alert_view_style:    UIAlertViewStyleDefault,
         tag:                 0,
+        container:           nil,
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
@@ -89,6 +382,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())dealloc {
+    // A deallocated alert must not leave its dialog on the window.
+    dismiss_container(env, this);
+
     // ИСПРАВЛЕНИЕ: Блокируем `host` в узком scope, чтобы снять заимствование до
     // `release`
     let (title, message, buttons) = {
@@ -155,9 +451,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 - (id)textFieldAtIndex:(NSInteger)_index { nil }
 
+// Real `UIAlertView` is a `UIView`, and the dialog this class puts on screen is
+// made of views — but the alert object itself is not one of them, so it has no
+// place in a view hierarchy. These stub the geometry selectors guest apps
+// actually invoke on alert views, none of which affect what gets drawn.
 - (())addSubview:(id)_view {
-    // UIAlertView doesn't support subviews in touchHLE (SDL2 dialog
-    // implementation)
     log_dbg!("UIAlertView addSubview: ignored");
 }
 - (())removeFromSuperview {
@@ -173,13 +471,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     log_dbg!("UIAlertView setFrame: ignored");
 }
 
-// UIAlertView inherits from UIView in real iOS.  We can't structurally
-// derive from UIView here (SDL2 dialog), so we stub the selectors that
-// guest apps actually invoke on alert views.
 - (())setTransform:(CGAffineTransform)_transform {
-    // UIAlertView in touchHLE is rendered via SDL2 system dialog,
-    // so geometric transforms are not applicable.
-    log_dbg!("UIAlertView setTransform: ignored (SDL2 dialog)");
+    // The dialog is laid out and centred by `-show`, so a guest transform has
+    // nothing to apply to.
+    log_dbg!("UIAlertView setTransform: ignored");
 }
 
 - (id)viewWithTag:(NSInteger)tag {
@@ -192,9 +487,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
-    // В iOS этот метод возвращает оптимальный размер на основе содержимого.
-    // Так как touchHLE выводит SDL2-диалог, размер контролируется самой ОС,
-    // поэтому мы пробрасываем текущий запрошенный размер дальше.
+    // On iOS this reports the size the content wants. The dialog sizes itself
+    // to the screen in `-show` and the alert object has no frame of its own, so
+    // the requested size is passed straight back.
     size
 }
 
@@ -215,7 +510,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())show {
-    log!("UIAlertView show (SDL2 dialog)");
+    log!("UIAlertView show");
     env.objc.borrow_mut::<UIAlertViewHostObject>(this).visible = true;
 
     let (title, message, buttons, cancel_index) = {
@@ -223,63 +518,53 @@ pub const CLASSES: ClassExports = objc_classes! {
         (h.title, h.message, h.button_titles, h.cancel_button_index)
     };
 
-    // Raw (un-substituted) strings, used to decide whether the alert
-    // actually has anything to show the user.
+    // Used to decide whether the alert actually has anything to show.
     let raw_title: String = if title != nil {
         ns_string::to_rust_string(env, title).into_owned()
     } else { String::new() };
     let raw_message: String = if message != nil {
         ns_string::to_rust_string(env, message).into_owned()
     } else { String::new() };
+    let has_content = !(raw_title.trim().is_empty() && raw_message.trim().is_empty());
 
-    // touchHLE renders UIAlertView as a *blocking* SDL2 system dialog,
-    // whereas real iOS `-[UIAlertView show]` is asynchronous and returns
-    // immediately. Some apps (notably Outfit7 titles like Talking Angela)
-    // create a content-less alert — empty/`nil` title *and* message — as a
-    // transient placeholder that they dismiss programmatically once some
-    // background work finishes. Presenting a blocking modal for such an
-    // alert freezes the app behind an empty dialog box that the user can
-    // never meaningfully act on. Since there is nothing to display, skip
-    // the native dialog and simulate an immediate dismissal so the guest's
-    // run loop keeps going (matching iOS's non-blocking semantics). Any
-    // delegate callbacks are still delivered via dismissWithClickedButtonIndex.
-    if raw_title.trim().is_empty() && raw_message.trim().is_empty() {
-        log!(
-            "UIAlertView show: empty title and message; \
-             skipping blocking SDL2 dialog and dismissing asynchronously"
-        );
-        let dismiss_index = if cancel_index >= 0 { cancel_index } else { 0 };
-        let _: () = msg![env; this dismissWithClickedButtonIndex:dismiss_index animated:false];
+    // UIKit always gives an alert at least one way out; without this a guest
+    // that forgot its buttons would put up a dialog nobody can dismiss.
+    let btn_count: NSUInteger = msg![env; buttons count];
+    if btn_count == 0 {
+        let ok = ns_string::get_static_str(env, "OK");
+        let _: () = msg![env; buttons addObject:ok];
+    }
+
+    // Some apps (notably Outfit7 titles like Talking Angela) create a
+    // content-less alert — empty/`nil` title *and* message — as a transient
+    // placeholder they dismiss programmatically once background work finishes.
+    // There is nothing to draw for one of those, so it is dismissed straight
+    // away. The same path catches a missing key window, where there would be
+    // nowhere to put the dialog and the guest would wait for a tap forever.
+    if has_content && present(env, this) {
         return;
     }
-
-    let title_str: String = if raw_title.is_empty() { "Alert".into() } else { raw_title };
-    let message_str: String = raw_message;
-
-    let btn_count: NSUInteger = msg![env; buttons count];
-    let mut btn_strings: Vec<String> = Vec::new();
-    for i in 0..btn_count {
-        let btn: id = msg![env; buttons objectAtIndex:i];
-        btn_strings.push(if btn != nil {
-            ns_string::to_rust_string(env, btn).into_owned()
-        } else { format!("Button {}", i) });
-    }
-    if btn_strings.is_empty() { btn_strings.push("OK".into()); }
-
-    let btn_refs: Vec<&str> = btn_strings.iter().map(|s| s.as_str()).collect();
-    let clicked = window::show_alert_dialog(env, &title_str, &message_str, &btn_refs);
-
-    let dismiss_index = if clicked >= 0 && (clicked as NSUInteger) < btn_count {
-        clicked as NSInteger
-    } else if cancel_index >= 0 {
-        cancel_index
-    } else { 0 };
-
+    log!(
+        "UIAlertView show: nothing to present (has_content={}); dismissing immediately",
+        has_content
+    );
+    let dismiss_index = if cancel_index >= 0 { cancel_index } else { 0 };
     let _: () = msg![env; this dismissWithClickedButtonIndex:dismiss_index animated:false];
+}
+
+// Sent by the dialog's buttons; see [make_button]. Not part of UIKit's API —
+// the name is deliberately unlike anything a guest would define.
+- (())touchHLEAlertButtonTapped:(id)sender {
+    let index: NSInteger = msg![env; sender tag];
+    let _: () = msg![env; this dismissWithClickedButtonIndex:index animated:false];
 }
 
 - (())dismissWithClickedButtonIndex:(NSInteger)button_index animated:(bool)_animated {
     env.objc.borrow_mut::<UIAlertViewHostObject>(this).visible = false;
+    // Off the screen before the delegate hears about it: the callbacks below
+    // routinely put up the *next* alert, and that one must not end up behind
+    // this one.
+    dismiss_container(env, this);
     let delegate = env.objc.borrow::<UIAlertViewHostObject>(this).delegate;
 
     // Честно проверяем, не был ли делегат удален (isa != 0)
