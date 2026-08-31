@@ -605,7 +605,20 @@ fn connect(
         return -1;
     }
 
-    match TcpStream::connect(socket_address) {
+    // Bound the wait rather than letting the host's default connect timeout run
+    // its course. Gamevil's old game servers are switched off but their IPs
+    // still route, so Zenonia 3's startup connect() to 218.145.70.37:32153 gets
+    // no response at all and iOS sits on it for 75 seconds before reporting
+    // ETIMEDOUT. The emulated CPU is stuck inside this call for that whole
+    // time, which was the bulk of that game's load time.
+    //
+    // A server that is actually there completes the handshake in well under a
+    // second even on a cellular connection, and the guest already has to handle
+    // ETIMEDOUT (it got one, just 75 seconds later), so giving up early costs
+    // nothing except the wait.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+    match TcpStream::connect_timeout(&SocketAddr::V4(socket_address), CONNECT_TIMEOUT) {
         Ok(host_stream) => {
             if let Err(e) = host_stream.set_nonblocking(true) {
                 log!("connect: set_nonblocking failed: {}", e);
@@ -620,7 +633,12 @@ fn connect(
             0 // Success
         }
         Err(e) => {
-            log!("connect: TcpStream::connect({:?}) failed: {}", socket_address, e);
+            log!(
+                "connect: TcpStream::connect_timeout({:?}, {:?}) failed: {}",
+                socket_address,
+                CONNECT_TIMEOUT,
+                e
+            );
             let errno = match e.kind() {
                 std::io::ErrorKind::ConnectionRefused  => ECONNREFUSED,
                 std::io::ErrorKind::TimedOut           => ETIMEDOUT,
