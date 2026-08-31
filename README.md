@@ -2,7 +2,10 @@
   <img src="branding/banner.png" alt="Applesauce — A playful emulator for iOS" width="760">
 </p>
 
-# Applesauce
+# Applesauce - UNOFFICIAL FORK!!!! PLEASE CREDITS TO THE REAL CREATOR
+https://github.com/johnny901901901/Applesauce
+
+Also please check out the credits regarding ZenoniaHLE since this helped me a lot
 
 **A playful emulator for iOS.** It plays supported 32-bit iPhone games on modern
 iPhones — **no jailbreak required**, though JIT is. It installs and runs on
@@ -190,6 +193,18 @@ by name, and renaming them would break every existing library.
 - [u/WorriedEquipment2241](https://www.reddit.com/user/WorriedEquipment2241/) for
   publicly demonstrating a separate touchHLE iOS experiment on a jailbroken device,
   which helped show the direction was worth pursuing.
+
+Also: 
+This is an unofficial Fork of AppleSauce.
+This was only intendet to make some Gamevil Games running i played as a kid for myself.
+I know that you can also play it emulator but since i wanted it on my iPhone i wanted to finish this project.
+Its still unstable but some of the Gamevil games like Zenonia 3 and Advena should be working.
+Zenonia 1 is the most stable one.
+
+As a reference i used this project: https://github.com/brycemcole/Zenonia-HLE
+It is meant to make Zenonia3 running on modern MacOS through TouchHLE, meaning
+it is a greaat base for my project.
+
 
 Licensed under MPL-2.0, subject to the existing third-party licence requirements.
 Upstream copyright headers and the licence are unchanged. touchHLE and HyperHLE are
