@@ -819,34 +819,43 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())displayIfNeeded {
     let &mut CALayerHostObject {
-        ref mut needs_display,
+        needs_display,
         delegate,
         ..
     } = env.objc.borrow_mut(this);
-    if !std::mem::take(needs_display) { return; }
+    if !needs_display { return; }
     if delegate == nil { return; }
 
     let delegate_class = ObjC::read_isa(delegate, &env.mem);
     if env.objc.class_has_method_named(delegate_class, "displayLayer:") {
+        env.objc.borrow_mut::<CALayerHostObject>(this).needs_display = false;
         () = msg![env; delegate displayLayer:this];
         return;
     }
 
     let &mut CALayerHostObject {
         cg_context,
-        ref mut gles_texture_is_up_to_date,
-        ref mut content_epoch,
         bounds: CGRect { origin, size },
         ..
     } = env.objc.borrow_mut(this);
-    *gles_texture_is_up_to_date = false;
-    *content_epoch = content_epoch.wrapping_add(1);
 
     let int_width = size.width.round() as GuestUSize;
     let int_height = size.height.round() as GuestUSize;
-    // --- ФИКС КРАША 0x0 ---
+    // A zero-sized layer has no bitmap to draw into. Leave it marked as needing
+    // display rather than consuming the flag, because the size may still be on
+    // its way: a `UIButton`'s title label has its text set while it is still at
+    // the zero size it was created with, and only `-layoutSubviews` later gives
+    // it the button's bounds. Dropping the flag here left such a layer blank for
+    // good — visible as a button that reacts to taps but never draws itself.
     if int_width == 0 || int_height == 0 {
         return;
+    }
+
+    {
+        let host_obj = env.objc.borrow_mut::<CALayerHostObject>(this);
+        host_obj.needs_display = false;
+        host_obj.gles_texture_is_up_to_date = false;
+        host_obj.content_epoch = host_obj.content_epoch.wrapping_add(1);
     }
 
     let need_new_context = cg_context.is_none_or(|existing|

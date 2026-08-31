@@ -92,6 +92,14 @@ pub(crate) struct UIViewHostObject {
     content_mode: NSInteger,
     autoresizing_mask: NSUInteger,
     autoresizes_subviews: bool,
+    /// Set when this view's subviews may no longer be positioned correctly, so
+    /// the next layout pass (see [layout_if_needed]) calls `layoutSubviews`.
+    ///
+    /// Starts out `true`: a view that has never been laid out is exactly the
+    /// case that needs it most. `UIButton`, for instance, creates its title
+    /// label and image views at zero size and relies on `-layoutSubviews` to
+    /// resize them to its bounds.
+    needs_layout: bool,
     clears_context_before_drawing: bool,
     user_interaction_enabled: bool,
     multiple_touch_enabled: bool,
@@ -147,6 +155,7 @@ impl Default for UIViewHostObject {
             content_mode: 0,      // UIViewContentModeScaleToFill
             autoresizing_mask: 0, // UIViewAutoresizingNone
             autoresizes_subviews: true,
+            needs_layout: true,
             clears_context_before_drawing: true,
             user_interaction_enabled: true,
             multiple_touch_enabled: false,
@@ -175,6 +184,73 @@ impl Default for UIViewHostObject {
 pub fn set_view_controller(env: &mut Environment, view: id, controller: id) {
     let host_obj = env.objc.borrow_mut::<UIViewHostObject>(view);
     host_obj.view_controller = controller;
+}
+
+/// Run `layoutSubviews` on `view` and its subviews, for those that have asked
+/// for it, and clear their dirty flags.
+///
+/// Real UIKit runs a layout pass on the run loop before each frame is drawn;
+/// `-setNeedsLayout` and a bounds change only mark a view dirty and return.
+/// touchHLE has no run-loop observer to hang that off, so the compositors call
+/// this on each window before they collect the layer tree.
+///
+/// Without it, `-layoutSubviews` would only ever run where something calls it
+/// by hand, which is how a `UIButton` created after launch ends up invisible
+/// but still tappable: the button's own bounds are set (so it hit-tests fine)
+/// while its title label and image views are left at the zero size they were
+/// created with, and a zero-sized layer draws nothing.
+///
+/// Parents are laid out before their children, because `-layoutSubviews` sets
+/// subview frames and so dirties those subviews in turn; visiting them
+/// afterwards lets the whole cascade settle in a single pass.
+pub fn layout_if_needed(env: &mut Environment, view: id) {
+    let needs_layout =
+        std::mem::take(&mut env.objc.borrow_mut::<UIViewHostObject>(view).needs_layout);
+    if needs_layout {
+        () = msg![env; view layoutSubviews];
+    }
+
+    // Indexed rather than iterated over a clone of the list: this runs for
+    // every window on every frame, and a view is free to add or remove
+    // subviews while laying itself out. The borrow is confined to the inner
+    // block so the recursive call can take `env` mutably.
+    let mut i = 0;
+    loop {
+        let subview = {
+            let host_obj = env.objc.borrow::<UIViewHostObject>(view);
+            match host_obj.subviews.get(i) {
+                Some(&subview) => subview,
+                None => break,
+            }
+        };
+        layout_if_needed(env, subview);
+        i += 1;
+    }
+}
+
+/// Mark `view` as needing layout if `new_size` is not the size it already has.
+///
+/// Apple's `-[UIView bounds]` documentation: "Changing the bounds rectangle
+/// [...] marks the view as needing layout." Subviews are positioned relative to
+/// their superview's size, so they have to be revisited when it changes.
+/// Only the size matters — moving a view around does not disturb its subviews.
+fn mark_needs_layout_if_resized(env: &mut Environment, view: id, new_size: CGSize) {
+    // A view's size is kept on its backing layer, which doesn't exist yet while
+    // the view is still being initialised. Nothing to compare against then, and
+    // nothing to do either: a new view starts out needing layout anyway.
+    if env.objc.borrow::<UIViewHostObject>(view).layer == nil {
+        return;
+    }
+
+    // The dimensions are copied out of the rects before being compared:
+    // `CGRect` is `#[repr(C, packed)]` and `PartialEq` takes its arguments by
+    // reference, so packed fields can't be compared in place.
+    let old_bounds: CGRect = msg![env; view bounds];
+    let (old_width, old_height) = (old_bounds.size.width, old_bounds.size.height);
+    let (new_width, new_height) = (new_size.width, new_size.height);
+    if old_width != new_width || old_height != new_height {
+        env.objc.borrow_mut::<UIViewHostObject>(view).needs_layout = true;
+    }
 }
 
 pub(super) fn gesture_recognizers(env: &Environment, view: id) -> Vec<id> {
@@ -973,8 +1049,6 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())setTranslatesAutoresizingMaskIntoConstraints:(bool)_translates { }
 - (bool)translatesAutoresizingMaskIntoConstraints { true }
-- (())setNeedsLayout { }
-- (())layoutIfNeeded { }
 - (())addConstraint:(id)_constraint { }
 - (())addConstraints:(id)_constraints { }
 - (())removeConstraint:(id)_constraint { }
@@ -1136,15 +1210,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 // Per Apple docs: "Use this method to force the view to update its layout
 // immediately. [...] This method acts on the root view of the receiver's
 // subtree, laying out the entire subtree starting from that root."
-// In our simplified implementation, we just call layoutSubviews.
 - (())layoutIfNeeded {
-    () = msg![env; this layoutSubviews];
+    layout_if_needed(env, this);
 }
 
 - (())setNeedsLayout {
-    // In a real implementation this would mark the view as needing layout
-    // on the next run loop iteration. Since we don't track dirty flags,
-    // this is a no-op — layoutSubviews will be called when appropriate.
+    // Apple docs: "Call this method on your application's main thread when you
+    // want to adjust the layout of a view's subviews. [...] it returns
+    // immediately, because it only sets a flag." The compositor runs the
+    // deferred pass itself; see [layout_if_needed].
+    env.objc.borrow_mut::<UIViewHostObject>(this).needs_layout = true;
 }
 
 // MARK: - Gesture recognizers
@@ -1601,6 +1676,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         }
     }
 
+    mark_needs_layout_if_resized(env, this, bounds.size);
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer setBounds:bounds]
 }
@@ -1657,6 +1733,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         }
     }
 
+    mark_needs_layout_if_resized(env, this, frame.size);
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer setFrame:frame]
 }

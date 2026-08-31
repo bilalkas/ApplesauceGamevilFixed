@@ -169,6 +169,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     () = msg_super![env; this setOpaque:false];
+    // A label's bitmap is its text laid out for one particular size, so a
+    // resize has to re-render it rather than stretch what was drawn before.
+    // This is the `UIViewContentModeRedraw` behaviour real `UILabel` has;
+    // plain `UIView` keeps Core Animation's default and is left alone.
+    let layer: id = msg![env; this layer];
+    () = msg![env; layer setNeedsDisplayOnBoundsChange:true];
     this
 }
 
@@ -178,6 +184,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     () = msg![env; this setTextColor:nil];
     () = msg![env; this setBackgroundColor:nil];
     () = msg_super![env; this setOpaque:false];
+    // A label's bitmap is its text laid out for one particular size, so a
+    // resize has to re-render it rather than stretch what was drawn before.
+    // This is the `UIViewContentModeRedraw` behaviour real `UILabel` has;
+    // plain `UIView` keeps Core Animation's default and is left alone.
+    let layer: id = msg![env; this layer];
+    () = msg![env; layer setNeedsDisplayOnBoundsChange:true];
     this
 }
 

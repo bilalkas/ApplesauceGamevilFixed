@@ -199,11 +199,16 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
         return None;
     }
 
-    // Advance any UIImageView frame animations, then let layers that need it
-    // redraw their bitmaps, exactly as the Core Animation compositor would.
+    // Advance any UIImageView frame animations, lay out anything that has been
+    // resized or newly added, then let layers that need it redraw their
+    // bitmaps, exactly as the Core Animation compositor would.
     crate::frameworks::uikit::ui_view::ui_image_view::update_animations(env);
     let mut root_layers = Vec::with_capacity(visible_windows.len());
     for window in visible_windows {
+        // Layout runs before display, because it is what gives a freshly
+        // created control's subviews their size, and a zero-sized layer can't
+        // draw its bitmap.
+        crate::frameworks::uikit::ui_view::layout_if_needed(env, window);
         let layer: id = msg![env; window layer];
         super::composition::display_layers(env, layer);
         root_layers.push(layer);
@@ -309,7 +314,10 @@ fn dump_layout(
     rotation: Matrix<2>,
 ) {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    const MAX_DUMPS: usize = 12;
+    // Zenonia 3 got through 11 of these before its title menu was even on
+    // screen, so a budget of a dozen runs out during loading and says nothing
+    // about the menus and dialogs that are the interesting part.
+    const MAX_DUMPS: usize = 24;
     static DUMPS: AtomicUsize = AtomicUsize::new(0);
     // `usize::MAX` is not a plausible layer count, so the first frame always
     // counts as a change.
@@ -353,6 +361,16 @@ fn dump_layout(
         let layer = quad.layer;
         let class: Class = msg![env; layer class];
         let class_name = env.objc.get_class_name(class).to_string();
+        // Every layer UIKit makes is a plain `CALayer`, so the layer's own class
+        // says nothing about what is on screen. Its delegate is the `UIView`
+        // that owns it, which is what identifies a quad as a button or a label.
+        let delegate: id = msg![env; layer delegate];
+        let class_name = if delegate == nil {
+            class_name
+        } else {
+            let delegate_class: Class = msg![env; delegate class];
+            format!("{}<{}>", class_name, env.objc.get_class_name(delegate_class))
+        };
         let content = match &quad.content {
             None => "none".to_string(),
             Some(content) => match &content.pixels {

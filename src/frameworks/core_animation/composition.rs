@@ -195,6 +195,9 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
     let window_layers: Vec<id> = windows
         .into_iter()
         .map(|window| {
+            // Lay out first: this is the deferred layout pass real UIKit runs
+            // on the run loop before drawing, and it can change layer bounds.
+            crate::frameworks::uikit::ui_view::layout_if_needed(env, window);
             let layer: id = msg![env; window layer];
             // Ensure layer bitmaps are up to date.
             display_layers(env, layer);
