@@ -21,6 +21,17 @@ pub fn get_log_file() -> &'static File {
     &LOG_FILE
 }
 
+/// Seconds elapsed since the first log line, which every line is prefixed with.
+///
+/// Without this a log says what happened and in what order, but not how long
+/// any of it took, which is exactly what's needed to answer "why does this app
+/// take so long to start?". The first log line is written early in startup, so
+/// using it as the zero point is close enough to process start.
+pub fn elapsed_secs() -> f64 {
+    static START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+    START.elapsed().as_secs_f64()
+}
+
 /// Prints a log message unconditionally. Use this for errors or warnings.
 ///
 /// The message is prefixed with the module path, so it is clear where it comes
@@ -81,7 +92,11 @@ macro_rules! log_once {
 macro_rules! echo {
     ($($arg:tt)+) => {
         {
-            let formatted_str = format!($($arg)+);
+            let formatted_str = format!(
+                "[{:8.3}] {}",
+                $crate::log::elapsed_secs(),
+                format_args!($($arg)+)
+            );
 
             #[cfg(target_os = "android")]
             {

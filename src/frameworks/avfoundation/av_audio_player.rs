@@ -105,21 +105,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     retain(env, url);
     env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).audio_file_url = url;
-    let tmp_afi_ptr: MutPtr<AudioFileID> = env.mem.alloc(guest_size_of::<AudioFileID>()).cast();
-    let status = AudioFileOpenURL(env, url, kAudioFileReadPermission, 0, tmp_afi_ptr) as NSInteger;
-    let audio_file_id = env.mem.read(tmp_afi_ptr);
-    env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).audio_file_id = Some(audio_file_id);
-    env.mem.free(tmp_afi_ptr.cast());
-    if status != 0 {
-        if !outError.is_null() {
-            let domain = ns_string::get_static_str(env, NSOSStatusErrorDomain);
-            let error = msg_class![env; NSError alloc];
-            let error = msg![env; error initWithDomain:domain code:status userInfo:nil];
-            env.mem.write(outError, error);
-        }
-        return nil;
-    }
-
+    // Note that the file is deliberately *not* opened here; see
+    // ensure_audio_file_open. This never reported a failure anyway:
+    // AudioFileOpenURL substitutes a dummy file and returns success when a
+    // path can't be read, so the error branch this replaces was dead code.
     this
 }
 
@@ -227,21 +216,17 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (())prepareToPlay {
     // The host object can be missing if the player was already deallocated
     // (e.g. the game released it but kept a stale pointer around) or if the
-    // initWithContentsOfURL: call earlier failed and never populated
-    // `audio_file_id`. In either case we have nothing to prepare; bail out
-    // with a warning instead of panicking on `unwrap()`.
-    let (audio_queue, audio_file_id_opt) = {
-        let host_object = env.objc.borrow::<AVAudioPlayerHostObject>(this);
-        (host_object.audio_queue, host_object.audio_file_id)
-    };
+    // player was never given a URL or data. In either case we have nothing to
+    // prepare; bail out with a warning instead of panicking on `unwrap()`.
+    let audio_queue = env.objc.borrow::<AVAudioPlayerHostObject>(this).audio_queue;
     if audio_queue.is_some() {
         return;
     }
-    let Some(audio_file_id) = audio_file_id_opt else {
+    let Some(audio_file_id) = ensure_audio_file_open(env, this) else {
         log!(
-            "Warning: [(AVAudioPlayer*){:?} prepareToPlay] called with no \
-             audio file ID (the player was never successfully initialized \
-             or it has been deallocated); ignoring.",
+            "Warning: [(AVAudioPlayer*){:?} prepareToPlay] has no audio file \
+             (the player was never successfully initialized or it has been \
+             deallocated); ignoring.",
             this
         );
         return;
@@ -655,6 +640,58 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+/// Open the player's audio file if it isn't open already, returning its ID.
+///
+/// `-initWithContentsOfURL:error:` deliberately doesn't do this. Opening a file
+/// decodes it *in full* — [crate::audio::AudioFile::open_for_reading] reads the
+/// whole thing and hands it to Symphonia, which returns 16-bit PCM — and
+/// Zenonia 3 constructs 76 players in a single burst as it reaches its first
+/// frame, 59 of them MP3 music tracks. Decoding every one of them up front is
+/// the bulk of that game's startup time, and it produces hundreds of megabytes
+/// of PCM for audio most of which is never played (only 25 of the 76 got as far
+/// as `-play` in a full session). The real AVAudioPlayer doesn't decode at init
+/// either.
+///
+/// Deferring to the first `-prepareToPlay` costs nothing elsewhere: every other
+/// reader of `audio_file_id` (`-duration`, `-setCurrentTime:`, the buffer
+/// callback) is already gated on `audio_desc`, which only `-prepareToPlay`
+/// sets, and `-stop` keeps the open file so replaying doesn't decode twice.
+///
+/// Returns [None] only for a player that has neither a URL nor an already-open
+/// file, i.e. one that was never successfully initialised.
+fn ensure_audio_file_open(env: &mut Environment, this: id) -> Option<AudioFileID> {
+    let (audio_file_id, url) = {
+        let host_object = env.objc.borrow::<AVAudioPlayerHostObject>(this);
+        (host_object.audio_file_id, host_object.audio_file_url)
+    };
+    // Already open — either from an earlier prepare, or from -initWithData:,
+    // which has no file to defer and registers its own audio file directly.
+    if audio_file_id.is_some() {
+        return audio_file_id;
+    }
+    if url == nil {
+        return None;
+    }
+
+    let tmp_afi_ptr: MutPtr<AudioFileID> = env.mem.alloc(guest_size_of::<AudioFileID>()).cast();
+    let status = AudioFileOpenURL(env, url, kAudioFileReadPermission, 0, tmp_afi_ptr);
+    let audio_file_id = env.mem.read(tmp_afi_ptr);
+    env.mem.free(tmp_afi_ptr.cast());
+    if status != 0 {
+        log!(
+            "Warning: [(AVAudioPlayer*){:?}] could not open its audio file \
+             (status {}); it will stay silent.",
+            this,
+            status
+        );
+        return None;
+    }
+    env.objc
+        .borrow_mut::<AVAudioPlayerHostObject>(this)
+        .audio_file_id = Some(audio_file_id);
+    Some(audio_file_id)
+}
 
 fn derive_buffer_size(
     audio_desc: AudioStreamBasicDescription,
