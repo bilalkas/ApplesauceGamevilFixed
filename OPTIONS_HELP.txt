@@ -361,11 +361,21 @@ Other options:
         and some in-game buttons that way) end up with invisible but still
         tappable controls.
 
-        Off by default: it composites an extra screen's worth of layers every
-        frame, and for an app whose UI layout this doesn't model correctly the
-        result is a covered or displaced game picture, which is worse than the
-        missing menu it set out to fix. Pass --ui-overlay to switch it on per
-        app, and --no-ui-overlay to switch it off again.
+        On by default. It composites an extra screen's worth of layers every
+        frame, and an app whose UI layout this doesn't model correctly can end
+        up with chrome covering the game, so --no-ui-overlay switches it off
+        per app.
+
+    --ui-overlay-rotation=<degrees|auto>
+        (iOS host only.) Rotation applied when blending the UIKit overlay over
+        the game picture.
+
+        The overlay is composited in portrait UIScreen space, the same space
+        UIKit lays the app out in, and then has to be turned to match the
+        display. "auto" (the default) uses the device orientation, which is
+        right for any app that rotates its UI the way UIKit does. Pass 0, 90,
+        180 or 270 if the app's UI ends up sideways or upside-down on top of an
+        otherwise correct picture.
 
     --prefer-gles2-context
         Force EAGL initWithAPI: to create an OpenGL ES 2.0 context even when

@@ -41,14 +41,11 @@
 //!
 //! # Known limitations
 //!
-//! These are why the whole thing is opt-in (`--ui-overlay`) rather than on by
-//! default: an app it models badly ends up with its game picture covered or
-//! displaced, which is a worse result than the missing menu it set out to fix.
-//!
 //! * The guest frame is stretched across the whole screen by the direct
 //!   presenter, so anything the layer tree puts *behind* the `CAEAGLLayer` is
 //!   dropped rather than drawn (see [collect_layer]). An app that puts a small
-//!   GL view next to visible UIKit chrome will lose the chrome behind it.
+//!   GL view next to visible UIKit chrome will lose the chrome behind it;
+//!   `--no-ui-overlay` is the escape hatch.
 //! * `cornerRadius` and pattern backgrounds are drawn as plain rectangles
 //!   (the rounded-corner 9-patch lives in the other compositor's GL objects,
 //!   which belong to the internal context).
@@ -154,21 +151,15 @@ pub struct Scene {
 /// Whether the overlay compositor is enabled at all.
 ///
 /// It only makes sense on the iOS host (everywhere else Core Animation
-/// composition still runs), and it is opt-in even there: `--ui-overlay` turns it
-/// on per app, and `TOUCHHLE_DISABLE_UI_OVERLAY=1` overrides that again on hosts
-/// where environment variables can actually be set.
+/// composition still runs). `--no-ui-overlay` turns it off per app, and
+/// `TOUCHHLE_DISABLE_UI_OVERLAY=1` does the same on hosts where environment
+/// variables can actually be set.
 pub fn is_enabled(env: &Environment) -> bool {
     if !cfg!(target_os = "ios") {
         return false;
     }
     if !env.options.ui_overlay {
-        // Worth a line in the log even though this is the default: an app whose
-        // menus are invisible but still respond to taps is exactly the symptom
-        // the overlay exists to fix, and nothing else points at the flag.
-        log_once!(
-            "Not compositing UIKit content over the guest frame. If this app's menus are \
-             invisible but still react to taps, try --ui-overlay."
-        );
+        log_once!("--no-ui-overlay: not compositing UIKit content over the guest frame.");
         return false;
     }
     if std::env::var_os("TOUCHHLE_DISABLE_UI_OVERLAY").is_some() {
@@ -271,15 +262,13 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
     // `present_frame`, and deliberately *not* `present_renderbuffer`'s own
     // rotation, which is the identity on this path because the guest already
     // draws in the display's orientation.
-    let rotation = match std::env::var("TOUCHHLE_UI_OVERLAY_ROTATION")
-        .ok()
-        .and_then(|degrees| degrees.trim().parse::<f32>().ok())
-    {
+    let rotation = match env.options.ui_overlay_rotation.or_else(|| {
+        std::env::var("TOUCHHLE_UI_OVERLAY_ROTATION")
+            .ok()
+            .and_then(|degrees| degrees.trim().parse::<f32>().ok())
+    }) {
         Some(degrees) => {
-            log_once!(
-                "TOUCHHLE_UI_OVERLAY_ROTATION is set: rotating the UIKit overlay by {}°.",
-                degrees
-            );
+            log_once!("Rotating the UIKit overlay by {}° as asked.", degrees);
             Matrix::<2>::z_rotation(degrees.to_radians())
         }
         None => env.window().rotation_matrix(),
@@ -290,10 +279,10 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
     log_once!(
         "Compositing UIKit content over the directly-presented guest frame \
          ({} layer(s) in the first frame). Pass --no-ui-overlay to turn this off, \
-         or set TOUCHHLE_UI_OVERLAY_ROTATION=<degrees> if it comes out rotated.",
+         or set --ui-overlay-rotation=<degrees> if it comes out rotated.",
         quads.len()
     );
-    dump_once(env, &quads, screen_bounds, fb_size, viewport, rotation);
+    dump_layout(env, &quads, screen_bounds, fb_size, viewport, rotation);
 
     Some(Scene {
         quads,
@@ -304,9 +293,14 @@ pub fn collect(env: &mut Environment) -> Option<Scene> {
     })
 }
 
-/// Log the first frame's draw list, so a misplaced or oversized overlay can be
-/// diagnosed from a log alone. Only the first call does anything.
-fn dump_once(
+/// Log the draw list, so a misplaced or oversized overlay can be diagnosed from
+/// a log alone.
+///
+/// The first frame is always dumped, and after that only frames whose layer
+/// count differs from the last dumped one — enough to catch the app's distinct
+/// UI states (splash, title menu, in-game) without logging every frame. Capped
+/// anyway, in case an app adds and removes a layer continuously.
+fn dump_layout(
     env: &mut Environment,
     quads: &[Quad],
     screen_bounds: CGRect,
@@ -314,9 +308,16 @@ fn dump_once(
     viewport: (u32, u32, u32, u32),
     rotation: Matrix<2>,
 ) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static DUMPED: AtomicBool = AtomicBool::new(false);
-    if DUMPED.swap(true, Ordering::Relaxed) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MAX_DUMPS: usize = 12;
+    static DUMPS: AtomicUsize = AtomicUsize::new(0);
+    // `usize::MAX` is not a plausible layer count, so the first frame always
+    // counts as a change.
+    static LAST_LEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+    if LAST_LEN.swap(quads.len(), Ordering::Relaxed) == quads.len() {
+        return;
+    }
+    if DUMPS.fetch_add(1, Ordering::Relaxed) >= MAX_DUMPS {
         return;
     }
 

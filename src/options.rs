@@ -84,14 +84,20 @@ pub struct Options {
     /// Direct presentation switches Core Animation composition off for good, so
     /// without this the app's nib- and `UIView`-drawn chrome is never rendered,
     /// only hit-tested — Zenonia 3's splash logo and title menu are invisible
-    /// but still tappable, for instance.
+    /// but still tappable, for instance, over a white background the game
+    /// itself drew.
     ///
-    /// It is nevertheless off by default: it composites a whole extra screen
+    /// On by default for that reason. It does composite a whole extra screen
     /// every frame, and an app whose UI it doesn't model correctly ends up with
-    /// its game picture covered or displaced rather than merely missing a menu,
-    /// which is the worse failure of the two. `--ui-overlay` turns it on per
-    /// app.
+    /// chrome covering the game, so `--no-ui-overlay` turns it off per app.
     pub ui_overlay: bool,
+    /// Rotation, in degrees, that turns the portrait `UIScreen` space the UIKit
+    /// overlay is composited in into the display's orientation.
+    ///
+    /// [None] means "use the device orientation", which is right whenever the
+    /// app rotates its UI the way UIKit does. `--ui-overlay-rotation=` exists so
+    /// an app that comes out sideways can be corrected without a rebuild.
+    pub ui_overlay_rotation: Option<f32>,
     pub scale_hack: NonZeroU32,
     pub deadzone: f32,
     pub analog_stick_tilt_controls: bool,
@@ -173,7 +179,8 @@ impl Default for Options {
             present_rotation_override: None,
             ios_es2_direct_present: false,
             ios_es1_direct_present: true,
-            ui_overlay: false,
+            ui_overlay: true,
+            ui_overlay_rotation: None,
             scale_hack: NonZeroU32::new(1).unwrap(),
             analog_stick_tilt_controls: true,
             deadzone: 0.1,
@@ -242,6 +249,16 @@ impl Options {
             self.ui_overlay = true;
         } else if arg == "--no-ui-overlay" {
             self.ui_overlay = false;
+        } else if let Some(value) = arg.strip_prefix("--ui-overlay-rotation=") {
+            self.ui_overlay_rotation = if value == "auto" {
+                None
+            } else {
+                let degrees: f32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| "Invalid value for --ui-overlay-rotation=".to_string())?;
+                Some(degrees)
+            };
         } else if let Some(value) = arg.strip_prefix("--present-rotation=") {
             self.present_rotation_override = if value == "auto" {
                 None
