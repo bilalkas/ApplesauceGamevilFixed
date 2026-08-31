@@ -92,23 +92,25 @@ macro_rules! log_once {
 macro_rules! echo {
     ($($arg:tt)+) => {
         {
+            // The trailing newline is part of the string rather than a second
+            // write_all: the log file is unbuffered, so every write is a
+            // syscall, and this path runs on the main thread roughly once per
+            // frame during play.
             let formatted_str = format!(
-                "[{:8.3}] {}",
+                "[{:8.3}] {}\n",
                 $crate::log::elapsed_secs(),
                 format_args!($($arg)+)
             );
 
             #[cfg(target_os = "android")]
             {
-                sdl2::log::log(&formatted_str);
+                sdl2::log::log(formatted_str.trim_end());
             }
             #[cfg(not(target_os = "android"))]
-            eprintln!("{}", formatted_str);
+            eprint!("{}", formatted_str);
 
             use std::io::Write;
-            let mut log_file = $crate::log::get_log_file();
-            let _ = log_file.write_all(formatted_str.as_bytes());
-            let _ = log_file.write_all(b"\n");
+            let _ = $crate::log::get_log_file().write_all(formatted_str.as_bytes());
         }
     };
     () => {
