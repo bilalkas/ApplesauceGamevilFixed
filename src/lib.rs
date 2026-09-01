@@ -143,6 +143,34 @@ fn take_host_exit_request() -> bool {
     HOST_EXIT_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+/// Route panic messages into `touchHLE_log.txt` as well as stderr.
+///
+/// Rust's default hook writes to stderr only. On Android that is discarded, and
+/// on iOS the host redirects stderr into `touchhle-host.log` — so a panic left
+/// `touchHLE_log.txt`, the file users actually send, ending mid-sentence with
+/// no reason given at all.
+///
+/// Idempotent: the iOS host calls this again for every game launch.
+pub fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "(non-string payload)"
+            };
+            if let Some(location) = info.location() {
+                echo_no_panic!("Panic at {}: {}", location, payload);
+            } else {
+                echo_no_panic!("Panic: {}", payload);
+            }
+        }));
+    });
+}
+
 /// This is the true entry point on Android (SDLActivity calls it after
 /// initialization). On other platforms the true entry point is in src/bin.rs.
 #[cfg(target_os = "android")]
@@ -151,22 +179,7 @@ pub extern "C" fn SDL_main(
     _argc: std::ffi::c_int,
     _argv: *const *const std::ffi::c_char,
 ) -> std::ffi::c_int {
-    // Rust's default panic handler prints to stderr, but on Android that just
-    // gets discarded, so we set a custom hook to make debugging easier.
-    std::panic::set_hook(Box::new(|info| {
-        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            *s
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.as_str()
-        } else {
-            "(non-string payload)"
-        };
-        if let Some(location) = info.location() {
-            echo_no_panic!("Panic at {}: {}", location, payload);
-        } else {
-            echo_no_panic!("Panic: {}", payload);
-        }
-    }));
+    install_panic_hook();
     // Empty args: brings up app picker.
     match main([String::new()].into_iter()) {
         Ok(_) => echo!("touchHLE finished"),

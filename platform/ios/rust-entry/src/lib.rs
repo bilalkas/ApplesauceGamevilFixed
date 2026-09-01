@@ -15,6 +15,11 @@ fn c_string(value: String) -> CString {
 }
 
 fn run_touchhle(args: Vec<String>) -> i32 {
+    // Without this the default hook applies, which writes only to stderr — and
+    // the host redirects stderr into touchhle-host.log. A panic then leaves
+    // touchHLE_log.txt, the log people actually send, ending mid-line with no
+    // reason in it.
+    touchHLE::install_panic_hook();
     touchHLE::clear_host_exit_request();
 
     // The emulator runs on the main thread and this is called from
