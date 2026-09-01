@@ -125,6 +125,14 @@ private enum OrientationSetting {
     static let portrait = 4
 }
 
+/// Gamevil titles that really are portrait games, despite the family-wide
+/// landscape policy in `launchOrientation`. Mirrors
+/// `PORTRAIT_ONLY_GAMEVIL_BUNDLES` in `src/bundle.rs`; keep the two in step.
+///
+/// Lowercased for comparison, because Gamevil were not consistent about the
+/// casing of their identifiers.
+private let portraitOnlyGamevilBundles: Set<String> = ["com.gamevil.airpenguin"]
+
 private struct GameFile: Identifiable {
     let url: URL
     let displayName: String
@@ -145,6 +153,15 @@ private struct GameFile: Identifiable {
         let isExplicitLandscape = orientation == OrientationSetting.landscapeLeft
             || orientation == OrientationSetting.landscapeRight
         let isExplicitPortrait = orientation == OrientationSetting.portrait
+
+        // Air Penguin is the exception to the rule below: a genuine portrait
+        // game, played by tilting a tall screen rather than turning it. Neither
+        // a saved landscape setting nor the device's current rotation may start
+        // it sideways.
+        if let bundleID = bundleIdentifier,
+           portraitOnlyGamevilBundles.contains(bundleID.lowercased()) {
+            return 0
+        }
 
         // Gamevil's legacy engines render through landscape OpenGL surfaces.
         // Do not allow a saved portrait setting or an inaccurate Info.plist to

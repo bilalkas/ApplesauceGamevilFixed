@@ -171,7 +171,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())setStatusBarOrientation:(UIInterfaceOrientation)orientation {
-    if env.bundle.bundle_identifier().starts_with("com.gamevil.")
+    if crate::bundle::is_landscape_only_gamevil(env.bundle.bundle_identifier())
         && matches!(
             orientation,
             UIDeviceOrientationPortrait | UIDeviceOrientationPortraitUpsideDown
@@ -179,6 +179,17 @@ pub const CLASSES: ClassExports = objc_classes! {
     {
         log_dbg!(
             "Ignoring portrait orientation request from landscape-only Gamevil app"
+        );
+        return;
+    }
+    if crate::bundle::is_portrait_only_gamevil(env.bundle.bundle_identifier())
+        && matches!(
+            orientation,
+            UIDeviceOrientationLandscapeLeft | UIDeviceOrientationLandscapeRight
+        )
+    {
+        log_dbg!(
+            "Ignoring landscape orientation request from portrait-only Gamevil app"
         );
         return;
     }

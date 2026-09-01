@@ -24,6 +24,34 @@ pub struct Bundle {
     plist: Dictionary,
 }
 
+/// Gamevil bundles that really are portrait games, despite the family-wide
+/// landscape policy below.
+///
+/// Compared case-insensitively, because Gamevil was not consistent about the
+/// casing of their identifiers (`com.gamevil.Zenonia` next to
+/// `com.gamevil.zenonia3f2p`).
+const PORTRAIT_ONLY_GAMEVIL_BUNDLES: &[&str] = &["com.gamevil.airpenguin"];
+
+/// Whether this bundle is one of the Gamevil titles that must stay portrait.
+///
+/// Air Penguin is played by tilting a tall screen; rotating it would turn a
+/// correctly oriented game sideways.
+pub fn is_portrait_only_gamevil(bundle_id: &str) -> bool {
+    PORTRAIT_ONLY_GAMEVIL_BUNDLES
+        .iter()
+        .any(|&id| bundle_id.eq_ignore_ascii_case(id))
+}
+
+/// Whether this bundle gets Gamevil's landscape-only policy.
+///
+/// Their legacy engines render through landscape surfaces whatever their
+/// `Info.plist` claims, so the whole family is started and kept in landscape
+/// (left or right, following the user's setting) rather than trusting the
+/// bundle — except for the titles in [PORTRAIT_ONLY_GAMEVIL_BUNDLES].
+pub fn is_landscape_only_gamevil(bundle_id: &str) -> bool {
+    bundle_id.starts_with("com.gamevil.") && !is_portrait_only_gamevil(bundle_id)
+}
+
 impl Bundle {
     /// See [Fs::new] for meaning of `read_only_mode`.
     pub fn new_bundle_and_fs_from_host_path(
