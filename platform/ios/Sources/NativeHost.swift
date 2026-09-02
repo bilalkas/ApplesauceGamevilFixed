@@ -1865,6 +1865,12 @@ private struct GameCard: View {
         CoreKind.installed.count > 1 ? core.displayName : "Tap to play"
     }
 
+    /// The export entries work, but are held back from the menu for now.
+    /// Everything behind them is still wired up — `addToHomeScreen`,
+    /// `exportApp`, `GameExportModel` and the sheet in `LibraryView` — so
+    /// flipping this to `true` is all it takes to show them again.
+    private static let exportEntriesShown = false
+
     /// Split out of `body`, which grew past what the Swift type checker will
     /// solve in one expression when the export entries were added.
     @ViewBuilder
@@ -1879,15 +1885,17 @@ private struct GameCard: View {
             }
         }
 
-        Button(action: addToHomeScreen) {
-            Label("Add to Home Screen", systemImage: "square.grid.2x2")
-        }
+        if Self.exportEntriesShown {
+            Button(action: addToHomeScreen) {
+                Label("Add to Home Screen", systemImage: "square.grid.2x2")
+            }
 
-        Button(action: exportApp) {
-            Label("Export as Standalone App", systemImage: "square.and.arrow.up.on.square")
-        }
+            Button(action: exportApp) {
+                Label("Export as Standalone App", systemImage: "square.and.arrow.up.on.square")
+            }
 
-        Divider()
+            Divider()
+        }
 
         Button(role: .destructive, action: delete) {
             Label("Remove from Library", systemImage: "trash")
