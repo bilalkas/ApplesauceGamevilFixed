@@ -1308,11 +1308,12 @@ private struct LibraryView: View {
             startPendingDeepLink()
         }
         .onReceive(
-            // Not wrapped in `Notification.Name(...)`: the constant's name ends
-            // in "Notification", so Swift already imports it as a
-            // `NSNotification.Name` rather than as a `String`.
+            // Spelled the way Swift imports it: because the constant's name
+            // ends in "Notification", the Clang importer drops that suffix and
+            // exposes it as a member of `NSNotification.Name`. The bare C name
+            // is not usable from Swift.
             NotificationCenter.default.publisher(
-                for: ApplesauceDidReceiveLaunchURLNotification
+                for: NSNotification.Name.ApplesauceDidReceiveLaunchURL
             )
         ) { _ in
             startPendingDeepLink()
