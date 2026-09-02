@@ -1198,22 +1198,7 @@ private struct LibraryView: View {
                         description: "Import a 32-bit iPhone game to add it to your library."
                     )
                 } else {
-                    ScrollView {
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 150), spacing: 16)],
-                            spacing: 16
-                        ) {
-                            ForEach(library.games) { game in
-                                card(for: game)
-                            }
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.top, 12)
-                        .padding(.bottom, 110)
-                    }
-                    .refreshable {
-                        library.reload()
-                    }
+                    grid
                 }
             }
             .navigationTitle("Library")
@@ -1328,6 +1313,25 @@ private struct LibraryView: View {
             )
         ) { _ in
             startPendingDeepLink()
+        }
+    }
+
+    private var grid: some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 150), spacing: 16)],
+                spacing: 16
+            ) {
+                ForEach(library.games) { game in
+                    card(for: game)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, 110)
+        }
+        .refreshable {
+            library.reload()
         }
     }
 
@@ -1468,36 +1472,7 @@ private struct StandaloneGameView: View {
         TouchHLENavigationContainer {
             ZStack {
                 LibraryBackground()
-
-                VStack(spacing: 20) {
-                    Spacer()
-
-                    icon
-                    Text(game?.displayName ?? bundled.displayName)
-                        .font(.title.bold())
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Spacer()
-
-                    Button(action: start) {
-                        Label("Play", systemImage: "play.fill")
-                            .font(.headline)
-                            .padding(.horizontal, 30)
-                            .padding(.vertical, 14)
-                    }
-                    .buttonStyle(.plain)
-                    .touchHLEImportButtonStyle()
-
-                    Text(JITMethod.current == .permanent
-                        ? "JIT is always on for this app."
-                        : "JIT has to be enabled each time this app starts.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.bottom, 24)
-                }
-                .padding(.horizontal, 32)
+                content
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
@@ -1551,6 +1526,52 @@ private struct StandaloneGameView: View {
             hasAutoStarted = true
             start()
         }
+    }
+
+    /// Split out of `body` for the Swift type checker's sake: inlined, this
+    /// stack plus the toolbar, two alerts and the overlay make one expression
+    /// too large for it to solve in its time budget.
+    private var content: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            icon
+            Text(title)
+                .font(.title.bold())
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer()
+
+            Button(action: start) {
+                Label("Play", systemImage: "play.fill")
+                    .font(.headline)
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 14)
+            }
+            .buttonStyle(.plain)
+            .touchHLEImportButtonStyle()
+
+            Text(jitNote)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.bottom, 24)
+        }
+        .padding(.horizontal, 32)
+    }
+
+    /// Resolved outside the view builder. `Text` has enough overloads that a
+    /// `??` or `?:` in its argument is expensive to type-check in place.
+    private var title: String {
+        game?.displayName ?? bundled.displayName
+    }
+
+    private var jitNote: String {
+        if JITMethod.current == .permanent {
+            return "JIT is always on for this app."
+        }
+        return "JIT has to be enabled each time this app starts."
     }
 
     @ViewBuilder
@@ -1816,7 +1837,7 @@ private struct GameCard: View {
                         .lineLimit(2)
                         .minimumScaleFactor(0.8)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(CoreKind.installed.count > 1 ? core.displayName : "Tap to play")
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1829,32 +1850,43 @@ private struct GameCard: View {
         .accessibilityLabel(game.displayName)
         .accessibilityHint("Starts this game in \(core.displayName)")
         .contextMenu {
-            if CoreKind.installed.count > 1, game.bundleIdentifier != nil {
-                Picker("Core", selection: coreSelection) {
-                    Text("Default (\(defaultCore.displayName))")
-                        .tag(CoreKind?.none)
-                    ForEach(CoreKind.installed) { kind in
-                        Text(kind.displayName).tag(CoreKind?.some(kind))
-                    }
-                }
-            }
-
-            Button(action: addToHomeScreen) {
-                Label("Add to Home Screen", systemImage: "square.grid.2x2")
-            }
-
-            Button(action: exportApp) {
-                Label("Export as Standalone App", systemImage: "square.and.arrow.up.on.square")
-            }
-
-            Divider()
-
-            Button(role: .destructive, action: delete) {
-                Label("Remove from Library", systemImage: "trash")
-            }
+            menu
         }
         .onAppear {
             coreOverride = CoreSelection.override(forBundleIdentifier: game.bundleIdentifier)
+        }
+    }
+
+    private var subtitle: String {
+        CoreKind.installed.count > 1 ? core.displayName : "Tap to play"
+    }
+
+    /// Split out of `body`, which grew past what the Swift type checker will
+    /// solve in one expression when the export entries were added.
+    @ViewBuilder
+    private var menu: some View {
+        if CoreKind.installed.count > 1, game.bundleIdentifier != nil {
+            Picker("Core", selection: coreSelection) {
+                Text("Default (\(defaultCore.displayName))")
+                    .tag(CoreKind?.none)
+                ForEach(CoreKind.installed) { kind in
+                    Text(kind.displayName).tag(CoreKind?.some(kind))
+                }
+            }
+        }
+
+        Button(action: addToHomeScreen) {
+            Label("Add to Home Screen", systemImage: "square.grid.2x2")
+        }
+
+        Button(action: exportApp) {
+            Label("Export as Standalone App", systemImage: "square.and.arrow.up.on.square")
+        }
+
+        Divider()
+
+        Button(role: .destructive, action: delete) {
+            Label("Remove from Library", systemImage: "trash")
         }
     }
 }
