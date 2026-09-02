@@ -33,7 +33,7 @@ pub type CFMutableStringRef = CFStringRef;
 // String encodings
 pub type CFStringEncoding = u32;
 pub const kCFStringEncodingMacRoman: CFStringEncoding = 0;
-pub const kCFStringEncodingNextStepLatin: CFStringEncoding = 0x422;
+pub const kCFStringEncodingNextStepLatin: CFStringEncoding = 0x0B02;
 pub const kCFStringEncodingASCII: CFStringEncoding = 0x600;
 pub const kCFStringEncodingUTF8: CFStringEncoding = 0x8000100;
 pub const kCFStringEncodingUnicode: CFStringEncoding = 0x100;
@@ -45,6 +45,19 @@ pub const kCFStringEncodingWindowsLatin1: CFStringEncoding = 0x0500;
 pub const kCFStringEncodingUTF32: CFStringEncoding = 0x0c000100;
 pub const kCFStringEncodingUTF32BE: CFStringEncoding = 0x18000100;
 pub const kCFStringEncodingUTF32LE: CFStringEncoding = 0x1c000100;
+
+// The CJK code pages. None of these has an `NSStringEncoding` constant of its
+// own, so Foundation sees them in the `0x8000_0000 | encoding` form produced
+// by `CFStringConvertEncodingToNSStringEncoding()` below.
+pub const kCFStringEncodingDOSJapanese: CFStringEncoding = 0x0420;
+pub const kCFStringEncodingDOSChineseSimplif: CFStringEncoding = 0x0421;
+pub const kCFStringEncodingDOSKorean: CFStringEncoding = 0x0422;
+pub const kCFStringEncodingDOSChineseTrad: CFStringEncoding = 0x0423;
+pub const kCFStringEncodingGB_18030_2000: CFStringEncoding = 0x0632;
+pub const kCFStringEncodingEUC_JP: CFStringEncoding = 0x0920;
+pub const kCFStringEncodingEUC_CN: CFStringEncoding = 0x0930;
+pub const kCFStringEncodingEUC_KR: CFStringEncoding = 0x0940;
+pub const kCFStringEncodingBig5: CFStringEncoding = 0x0A03;
 
 // String normalization forms
 pub type CFStringNormalizationForm = CFIndex;
@@ -136,13 +149,13 @@ pub fn CFStringConvertEncodingToNSStringEncoding(
         kCFStringEncodingUTF32 => ns_string::NSUTF32StringEncoding,
         kCFStringEncodingUTF32BE => ns_string::NSUTF32BigEndianStringEncoding,
         kCFStringEncodingUTF32LE => ns_string::NSUTF32LittleEndianStringEncoding,
-        _ => {
-            log!(
-                "Warning: Unhandled CFStringEncoding {:#x}, defaulting to UTF-8",
-                encoding
-            );
-            ns_string::NSUTF8StringEncoding
-        }
+        // Anything else — the CJK code pages above, most of all — becomes
+        // `0x8000_0000 | encoding`, exactly as Apple does for encodings with
+        // no `NSStringEncoding` constant. Foundation understands that form,
+        // so pass it through instead of pretending the text is UTF-8: for
+        // CP949 or Big5 content that assumption produces silent mojibake and
+        // wrong byte counts.
+        _ => ns_string::NSCFStringEncodingFlag | encoding,
     }
 }
 
@@ -163,6 +176,14 @@ fn CFStringConvertNSStringEncodingToEncoding(
         ns_string::NSUTF32StringEncoding => kCFStringEncodingUTF32,
         ns_string::NSUTF32BigEndianStringEncoding => kCFStringEncodingUTF32BE,
         ns_string::NSUTF32LittleEndianStringEncoding => kCFStringEncodingUTF32LE,
+        // The inverse of the fallback in
+        // [CFStringConvertEncodingToNSStringEncoding]: strip the flag back off.
+        // This has to come after the explicit arms, because a few of the real
+        // `NSStringEncoding` constants (the UTF-16/32 endian ones, and
+        // NeXTSTEP Latin) also have the high bit set.
+        _ if encoding & ns_string::NSCFStringEncodingFlag != 0 => {
+            encoding & !ns_string::NSCFStringEncodingFlag
+        }
         _ => {
             log!(
                 "Warning: Unhandled NSStringEncoding {:#x}, defaulting to UTF-8",
@@ -189,6 +210,15 @@ fn CFStringIsEncodingAvailable(_env: &mut Environment, encoding: CFStringEncodin
             | kCFStringEncodingUTF32BE
             | kCFStringEncodingUTF32LE
             | kCFStringEncodingNextStepLatin
+            | kCFStringEncodingDOSJapanese
+            | kCFStringEncodingDOSChineseSimplif
+            | kCFStringEncodingDOSKorean
+            | kCFStringEncodingDOSChineseTrad
+            | kCFStringEncodingGB_18030_2000
+            | kCFStringEncodingEUC_JP
+            | kCFStringEncodingEUC_CN
+            | kCFStringEncodingEUC_KR
+            | kCFStringEncodingBig5
     )
 }
 
@@ -920,7 +950,11 @@ fn cf_string_bytes_for_encoding(
             let (cow, _, _) = encoding_rs::SHIFT_JIS.encode(&rust_string);
             cow.into_owned()
         }
-        _ => rust_string.as_bytes().to_vec(),
+        // Everything else — the CJK code pages included — goes through
+        // Foundation's encoder rather than a second, thinner copy of it here.
+        // `None` from it means the string genuinely has no representation in
+        // this encoding, which is what the callers above want to hear.
+        _ => ns_string::encode_string(&rust_string, encoding, lossy)?,
     };
     Some(bytes)
 }

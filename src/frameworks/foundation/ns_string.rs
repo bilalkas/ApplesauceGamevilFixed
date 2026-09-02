@@ -58,12 +58,38 @@ pub const NSWindowsCP1250StringEncoding: NSUInteger = 15;
 pub const NSISO2022JPStringEncoding: NSUInteger = 21;
 pub const NSMacOSRomanStringEncoding: NSUInteger = 30;
 pub const NSUTF16StringEncoding: NSUInteger = NSUnicodeStringEncoding;
-pub const NSNextStepLatinStringEncoding: NSUInteger = 0x422;
+pub const NSNextStepLatinStringEncoding: NSUInteger = 0x8000_0B02;
 pub const NSUTF16BigEndianStringEncoding: NSUInteger = 0x90000100;
 pub const NSUTF16LittleEndianStringEncoding: NSUInteger = 0x94000100;
 pub const NSUTF32LittleEndianStringEncoding: NSUInteger = 0x9c000100;
 pub const NSUTF32StringEncoding: NSUInteger = 0x8c000100;
 pub const NSUTF32BigEndianStringEncoding: NSUInteger = 0x98000100;
+
+/// A `CFStringEncoding` that has no `NSStringEncoding` constant of its own
+/// reaches Foundation as `0x8000_0000 | cf_encoding` — that is what Apple's
+/// `CFStringConvertEncodingToNSStringEncoding()` returns for it. The CJK code
+/// pages below have no NS constant, so this is the only form apps can ask for
+/// them in, and Korean and Chinese games do exactly that for their text:
+/// Zenonia 4 keeps all of its strings in CP949 and requests `0x8000_0422`.
+pub const NSCFStringEncodingFlag: NSUInteger = 0x8000_0000;
+/// CP932, `kCFStringEncodingDOSJapanese`.
+pub const NSCFDOSJapaneseStringEncoding: NSUInteger = 0x8000_0420;
+/// CP936, `kCFStringEncodingDOSChineseSimplif`.
+pub const NSCFDOSChineseSimplifStringEncoding: NSUInteger = 0x8000_0421;
+/// CP949 / Unified Hangul Code, `kCFStringEncodingDOSKorean`.
+pub const NSCFDOSKoreanStringEncoding: NSUInteger = 0x8000_0422;
+/// CP950, `kCFStringEncodingDOSChineseTrad`.
+pub const NSCFDOSChineseTradStringEncoding: NSUInteger = 0x8000_0423;
+/// `kCFStringEncodingGB_18030_2000`.
+pub const NSCFGB18030StringEncoding: NSUInteger = 0x8000_0632;
+/// `kCFStringEncodingEUC_JP`.
+pub const NSCFEUCJPStringEncoding: NSUInteger = 0x8000_0920;
+/// `kCFStringEncodingEUC_CN`.
+pub const NSCFEUCCNStringEncoding: NSUInteger = 0x8000_0930;
+/// `kCFStringEncodingEUC_KR`.
+pub const NSCFEUCKRStringEncoding: NSUInteger = 0x8000_0940;
+/// `kCFStringEncodingBig5`.
+pub const NSCFBig5StringEncoding: NSUInteger = 0x8000_0A03;
 
 pub type NSStringCompareOptions = NSUInteger;
 pub const NSCaseInsensitiveSearch: NSUInteger = 1;
@@ -92,6 +118,18 @@ const C_STRING_FRIENDLY_ENCODINGS: &[NSStringEncoding] = &[
     NSJapaneseEUCStringEncoding,
     NSNEXTSTEPStringEncoding,
     NSNextStepLatinStringEncoding,
+    // The CJK code pages are double-byte, but ASCII-transparent: every
+    // trailing byte of a multi-byte sequence is >= 0x40, so a NUL can only
+    // ever be the terminator.
+    NSCFDOSJapaneseStringEncoding,
+    NSCFDOSChineseSimplifStringEncoding,
+    NSCFDOSKoreanStringEncoding,
+    NSCFDOSChineseTradStringEncoding,
+    NSCFGB18030StringEncoding,
+    NSCFEUCJPStringEncoding,
+    NSCFEUCCNStringEncoding,
+    NSCFEUCKRStringEncoding,
+    NSCFBig5StringEncoding,
 ];
 
 /// Unicode mappings for bytes 0x80..=0xFF in the NeXTSTEP / NSNEXTSTEP
@@ -130,6 +168,17 @@ fn encoding_rs_for(encoding: NSStringEncoding) -> Option<&'static encoding_rs::E
         NSWindowsCP1252StringEncoding => encoding_rs::WINDOWS_1252,
         NSWindowsCP1253StringEncoding => encoding_rs::WINDOWS_1253,
         NSWindowsCP1254StringEncoding => encoding_rs::WINDOWS_1254,
+        // The CJK code pages, which apps can only reach in the CF-derived
+        // form (see [NSCFStringEncodingFlag]). `encoding_rs`' EUC-KR is the
+        // WHATWG one, whose index is the full Unified Hangul Code set, so it
+        // is the right codec for CP949 as well as for EUC-KR proper; likewise
+        // GBK covers EUC-CN, and Big5 covers CP950.
+        NSCFDOSJapaneseStringEncoding => encoding_rs::SHIFT_JIS,
+        NSCFDOSChineseSimplifStringEncoding | NSCFEUCCNStringEncoding => encoding_rs::GBK,
+        NSCFDOSKoreanStringEncoding | NSCFEUCKRStringEncoding => encoding_rs::EUC_KR,
+        NSCFDOSChineseTradStringEncoding | NSCFBig5StringEncoding => encoding_rs::BIG5,
+        NSCFGB18030StringEncoding => encoding_rs::GB18030,
+        NSCFEUCJPStringEncoding => encoding_rs::EUC_JP,
         _ => return None,
     })
 }
@@ -179,7 +228,14 @@ fn encode_nextstep(string: &str) -> Vec<u8> {
 /// `cStringUsingEncoding:` yield nil/NULL on an inconvertible string.
 /// When `lossy` is true, unrepresentable characters are replaced with
 /// `?` (or the codec's own substitution) instead.
-fn encode_string(string: &str, encoding: NSStringEncoding, lossy: bool) -> Option<Vec<u8>> {
+///
+/// Visible to the crate so Core Foundation's `CFStringGetBytes()` family can
+/// share this one encoder rather than keeping a second, thinner copy.
+pub(crate) fn encode_string(
+    string: &str,
+    encoding: NSStringEncoding,
+    lossy: bool,
+) -> Option<Vec<u8>> {
     match encoding {
         NSASCIIStringEncoding => {
             let mut out = Vec::with_capacity(string.len());
