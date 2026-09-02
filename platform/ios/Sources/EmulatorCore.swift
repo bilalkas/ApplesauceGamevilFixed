@@ -45,7 +45,9 @@ enum CoreKind: String, CaseIterable, Identifiable {
         }
     }
 
-    fileprivate var libraryName: String { "lib\(rawValue)_core.dylib" }
+    /// Not fileprivate: exporting a standalone app drops the cores that game
+    /// does not use, and needs to know what they are called.
+    var libraryName: String { "lib\(rawValue)_core.dylib" }
 
     fileprivate var libraryURL: URL? {
         Bundle.main.privateFrameworksURL?.appendingPathComponent(libraryName)

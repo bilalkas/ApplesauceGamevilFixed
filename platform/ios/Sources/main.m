@@ -4,10 +4,12 @@
 #include <errno.h>
 #include <limits.h>
 #include <objc/message.h>
+#include <objc/runtime.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -173,6 +175,123 @@ static void redirect_diagnostics(void) {
     fprintf(stderr, "touchHLE iOS port diagnostics started\n");
 }
 
+// MARK: - applesauce:// deep links
+//
+// Putting a game on the Home Screen installs a Web Clip that opens
+// applesauce://launch?file=<name>. Catching that URL is awkward here because
+// SDL, not this file, owns both the UIApplication delegate and the scene
+// delegate. What makes it tractable is that SDL funnels every URL the app is
+// opened with through a single method: cold launches iterate
+// connectionOptions.URLContexts inside -scene:willConnectToSession:options:,
+// warm ones arrive at -scene:openURLContexts:, and both end up calling
+// -[SDLUIKitSceneDelegate sendDropFileForURL:] (see
+// vendor/rust-sdl2/sdl2-sys/SDL/src/video/uikit/SDL_uikitappdelegate.m).
+// Swizzling that one method covers both paths.
+//
+// It has to be installed from +load rather than from main(): on a cold launch
+// the scene connects, and the URL is delivered, before SDL calls SDL_main
+// (which is what main() below really is). By +load time SDL is already linked
+// in, so its class is registered and ready to patch.
+
+NSString *const ApplesauceDidReceiveLaunchURLNotification =
+    @"ApplesauceDidReceiveLaunchURLNotification";
+
+// Written by the hook, read once the SwiftUI host is up. Both happen on the
+// main thread, so no locking.
+//
+// Kept as a C string rather than as an NSURL because this file is not built
+// with ARC: a bare `static NSURL *` would hold an autoreleased object that is
+// gone by the time the host looks at it, and retain/release here would then
+// stop compiling the day ARC is turned on. A strdup'd string is right either
+// way.
+static char *applesauce_pending_launch_url;
+static bool applesauce_url_hook_installed;
+
+static void applesauce_set_pending_launch_url(NSURL *url) {
+    free(applesauce_pending_launch_url);
+    applesauce_pending_launch_url = NULL;
+
+    const char *text = url.absoluteString.UTF8String;
+    if (text != NULL) {
+        applesauce_pending_launch_url = strdup(text);
+    }
+}
+
+NSURL *touchhle_ios_take_pending_launch_url(void) {
+    char *raw = applesauce_pending_launch_url;
+    if (raw == NULL) {
+        return nil;
+    }
+    applesauce_pending_launch_url = NULL;
+
+    // +URLWithString: hands back an autoreleased URL, which is what Swift
+    // expects from an imported function returning an object it did not create.
+    NSURL *url = [NSURL URLWithString:[NSString stringWithUTF8String:raw]];
+    free(raw);
+    return url;
+}
+
+@interface ApplesauceURLHook : NSObject
+@end
+
+@implementation ApplesauceURLHook
+
++ (void)load {
+    Class scene_delegate = NSClassFromString(@"SDLUIKitSceneDelegate");
+    if (scene_delegate == Nil) {
+        return;
+    }
+
+    SEL original_selector = NSSelectorFromString(@"sendDropFileForURL:");
+    SEL our_selector = @selector(applesauce_sendDropFileForURL:);
+
+    Method original = class_getInstanceMethod(scene_delegate, original_selector);
+    Method ours = class_getInstanceMethod(self, our_selector);
+    if (original == NULL || ours == NULL) {
+        return;
+    }
+
+    // Add our implementation to SDL's class first, so the exchange below stays
+    // within one class. Without that step the two methods would live in
+    // different classes and the "call through to the original" trick at the
+    // bottom of the hook would recurse forever.
+    if (!class_addMethod(
+            scene_delegate,
+            our_selector,
+            method_getImplementation(ours),
+            method_getTypeEncoding(ours)
+        )) {
+        return;
+    }
+
+    Method added = class_getInstanceMethod(scene_delegate, our_selector);
+    if (added == NULL) {
+        return;
+    }
+
+    method_exchangeImplementations(original, added);
+    applesauce_url_hook_installed = true;
+}
+
+- (void)applesauce_sendDropFileForURL:(NSURL *)url {
+    if ([url.scheme caseInsensitiveCompare:@"applesauce"] == NSOrderedSame) {
+        applesauce_set_pending_launch_url(url);
+        // The host may or may not be listening yet: on a cold launch this runs
+        // before SwiftUI exists, and the pending URL above is what it reads on
+        // startup. On a warm one the notification is what gets it moving.
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:ApplesauceDidReceiveLaunchURLNotification
+                          object:url];
+        return;
+    }
+
+    // After the exchange this selector carries SDL's original implementation,
+    // so anything that is not ours still becomes an SDL drop-file event.
+    [self applesauce_sendDropFileForURL:url];
+}
+
+@end
+
 static void start_native_host(void) {
     Class host_class = NSClassFromString(@"TouchHLENativeHost");
     SEL selector = NSSelectorFromString(@"start");
@@ -239,6 +358,14 @@ int main(int argc, char *argv[]) {
 
     redirect_diagnostics();
     touchhle_ios_log_jit_status("launch");
+
+    // +load ran long before the log existed, so report the result here.
+    fprintf(
+        stderr,
+        "touchHLE: applesauce:// URL hook installed=%d pending=%s\n",
+        applesauce_url_hook_installed,
+        applesauce_pending_launch_url ? applesauce_pending_launch_url : "(none)"
+    );
 
     char *base_path = SDL_GetBasePath();
     if (base_path != NULL) {

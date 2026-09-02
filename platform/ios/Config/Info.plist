@@ -18,12 +18,43 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<!--
+	    "Add to Home Screen" installs a Web Clip whose URL is
+	    applesauce://launch?file=<name>. Tapping it brings up this app, which
+	    starts that one game. SDL owns the scene delegate, so the URL is caught
+	    by the hook in Sources/main.m.
+
+	    A standalone app exported with "Export as Standalone App" has this key
+	    stripped from its copy of the Info.plist: only the real Applesauce
+	    should answer for the scheme.
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>io.github.johnny901901901.applesauce.launch</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>applesauce</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!--
+	    Installing a Web Clip means handing Safari a .mobileconfig, and the only
+	    way to do that from inside a sandboxed app is to serve it over HTTP from
+	    a listener on 127.0.0.1. Loopback is exempt from the local network
+	    permission prompt, but declare a reason in case iOS ever asks anyway.
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Applesauce serves the Home Screen icon profile to Safari over a local connection that never leaves this device.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

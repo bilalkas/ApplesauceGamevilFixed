@@ -297,6 +297,33 @@ private final class GameLibrary: ObservableObject {
         }
     }
 
+    /// The game a Home Screen icon is asking for.
+    ///
+    /// The file name is what the link was built from and is unique within the
+    /// library. The guest bundle identifier is a fallback for a game that has
+    /// been re-imported since, and so is sitting under a slightly different
+    /// name than the icon remembers.
+    func game(matching target: GameLink.Target) -> GameFile? {
+        if let fileName = target.fileName,
+           let match = games.first(where: { $0.url.lastPathComponent == fileName }) {
+            return match
+        }
+
+        guard let bundleIdentifier = target.bundleIdentifier, !bundleIdentifier.isEmpty else {
+            return nil
+        }
+        return games.first {
+            $0.bundleIdentifier?.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+        }
+    }
+
+    /// The game an exported standalone app carries. Read through the same
+    /// metadata path as the library, so it gets its icon and its declared
+    /// orientations rather than only what was written into the export.
+    func bundledGameFile(_ bundled: BundledGame) -> GameFile {
+        gameFile(from: bundled.url)
+    }
+
     func launch(
         _ game: GameFile,
         scaleHack: Int,
@@ -1009,7 +1036,15 @@ final class TouchHLENativeHost: NSObject {
         }
 
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = UIHostingController(rootView: LibraryView())
+        // An app produced by "Export as Standalone App" carries exactly one
+        // game and has no library to show.
+        if let bundled = BundledGame.current {
+            window.rootViewController = UIHostingController(
+                rootView: StandaloneGameView(bundled: bundled)
+            )
+        } else {
+            window.rootViewController = UIHostingController(rootView: LibraryView())
+        }
         window.tintColor = .systemBlue
         window.makeKeyAndVisible()
         self.window = window
@@ -1136,6 +1171,7 @@ final class TouchHLENativeHost: NSObject {
 
 private struct LibraryView: View {
     @StateObject private var library = GameLibrary()
+    @StateObject private var export = GameExportModel()
     @State private var showingImporter = false
     @State private var showingSettings = false
     @State private var showingAbout = false
@@ -1177,6 +1213,33 @@ private struct LibraryView: View {
                                             orientation: orientation,
                                             networkAccess: networkAccess,
                                             analogTilt: analogTilt
+                                        )
+                                    },
+                                    addToHomeScreen: {
+                                        export.addToHomeScreen(
+                                            GameExportModel.HomeScreenRequest(
+                                                fileName: game.url.lastPathComponent,
+                                                displayName: game.displayName,
+                                                bundleIdentifier: game.bundleIdentifier,
+                                                icon: game.icon
+                                            )
+                                        )
+                                    },
+                                    exportApp: {
+                                        export.exportStandaloneApp(
+                                            .make(
+                                                gameURL: game.url,
+                                                displayName: game.displayName,
+                                                bundleIdentifier: game.bundleIdentifier,
+                                                icon: game.icon,
+                                                core: CoreSelection.kind(
+                                                    forBundleIdentifier: game.bundleIdentifier
+                                                ),
+                                                scaleHack: scaleHack,
+                                                orientation: orientation,
+                                                networkAccess: networkAccess,
+                                                analogTilt: analogTilt
+                                            )
                                         )
                                     },
                                     delete: { library.delete(game) }
@@ -1245,6 +1308,9 @@ private struct LibraryView: View {
             .sheet(isPresented: $showingAbout) {
                 AboutView()
             }
+            .sheet(isPresented: exportBinding) {
+                GameExportSheet(model: export)
+            }
             .alert("Couldn’t Import Game", isPresented: errorBinding(for: $library.importError)) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -1287,8 +1353,64 @@ private struct LibraryView: View {
         .touchHLEOnChange(of: scenePhase) { newPhase in
             if newPhase == .active {
                 library.reload()
+                startPendingDeepLink()
             }
         }
+        .onAppear {
+            // A Home Screen icon that cold-launched the app delivered its URL
+            // before SwiftUI existed, so it is waiting rather than announced.
+            startPendingDeepLink()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: Notification.Name(ApplesauceDidReceiveLaunchURLNotification)
+            )
+        ) { _ in
+            startPendingDeepLink()
+        }
+    }
+
+    /// Starts the game a Home Screen icon asked for, if one did.
+    ///
+    /// The URL is read from the shared slot rather than from the notification,
+    /// so whichever of the two paths above gets there first consumes it and the
+    /// other finds nothing left to do.
+    private func startPendingDeepLink() {
+        guard !library.isLaunching,
+              library.heldLaunch == nil,
+              let url = touchhle_ios_take_pending_launch_url(),
+              let target = GameLink.target(from: url as URL)
+        else {
+            return
+        }
+
+        guard let game = library.game(matching: target) else {
+            library.launchError = "That game is no longer in your library."
+            return
+        }
+
+        library.launch(
+            game,
+            scaleHack: scaleHack,
+            orientation: orientation,
+            networkAccess: networkAccess,
+            analogTilt: analogTilt
+        )
+    }
+
+    /// Dismissing the export sheet must not cancel what it started: after
+    /// "Continue in Safari" the profile server still has to answer a fetch, and
+    /// a build that is already running keeps going and reopens the sheet with
+    /// its result.
+    private var exportBinding: Binding<Bool> {
+        Binding(
+            get: { export.isActive },
+            set: { isPresented in
+                if !isPresented {
+                    export.dismiss()
+                }
+            }
+        )
     }
 
     private var heldLaunchBinding: Binding<Bool> {
@@ -1308,6 +1430,165 @@ private struct LibraryView: View {
             set: { isPresented in
                 if !isPresented {
                     error.wrappedValue = nil
+                }
+            }
+        )
+    }
+}
+
+/// The whole UI of an app exported with "Export as Standalone App".
+///
+/// There is no library and no import button: the game is inside the bundle and
+/// the app exists to run it. It still needs a screen, because JIT has to be
+/// enabled per launch on most devices and because a game that exits has to land
+/// somewhere.
+private struct StandaloneGameView: View {
+    let bundled: BundledGame
+
+    @StateObject private var library = GameLibrary()
+    @State private var game: GameFile?
+    @State private var hasAutoStarted = false
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        TouchHLENavigationContainer {
+            ZStack {
+                LibraryBackground()
+
+                VStack(spacing: 20) {
+                    Spacer()
+
+                    icon
+                    Text(game?.displayName ?? bundled.displayName)
+                        .font(.title.bold())
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer()
+
+                    Button(action: start) {
+                        Label("Play", systemImage: "play.fill")
+                            .font(.headline)
+                            .padding(.horizontal, 30)
+                            .padding(.vertical, 14)
+                    }
+                    .buttonStyle(.plain)
+                    .touchHLEImportButtonStyle()
+
+                    Text(JITMethod.current == .permanent
+                        ? "JIT is always on for this app."
+                        : "JIT has to be enabled each time this app starts.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.bottom, 24)
+                }
+                .padding(.horizontal, 32)
+            }
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    EnableJITButton()
+                }
+            }
+            .alert("Game Couldn’t Start", isPresented: launchErrorBinding) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(library.launchError ?? "Unknown error")
+            }
+            .alert(
+                "JIT Isn’t Enabled",
+                isPresented: heldLaunchBinding,
+                presenting: library.heldLaunch
+            ) { held in
+                Button("Enable JIT") {
+                    if let url = StikDebug.enableJITURL {
+                        openURL(url)
+                    }
+                }
+                Button("Start Anyway", role: .destructive) {
+                    library.start(held)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text(JITMethod.current.unavailableMessage)
+            }
+            .overlay {
+                if library.isLaunching {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Starting game…")
+                            .font(.headline)
+                    }
+                    .padding(24)
+                    .touchHLELaunchOverlayStyle()
+                }
+            }
+        }
+        .onAppear {
+            if game == nil {
+                game = library.bundledGameFile(bundled)
+            }
+            // Straight into the game the first time, so the app behaves like
+            // the one it is pretending to be. Only once: coming back here after
+            // the game exits must not start it again.
+            guard !hasAutoStarted else { return }
+            hasAutoStarted = true
+            start()
+        }
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if let icon = game?.icon {
+            Image(uiImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 128, height: 128)
+                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .shadow(color: .black.opacity(0.2), radius: 12, y: 6)
+        } else {
+            Image(systemName: "gamecontroller.fill")
+                .font(.system(size: 72, weight: .medium))
+                .foregroundStyle(.blue)
+        }
+    }
+
+    private func start() {
+        let game = self.game ?? library.bundledGameFile(bundled)
+        self.game = game
+        // An export ships only the core its game was set to use, so the
+        // fallback in CoreSelection would land on it anyway. Pin it regardless:
+        // it costs one UserDefaults write and stops being luck.
+        CoreSelection.setOverride(bundled.core, forBundleIdentifier: game.bundleIdentifier)
+        library.launch(
+            game,
+            scaleHack: bundled.scaleHack,
+            orientation: bundled.orientation,
+            networkAccess: bundled.networkAccess,
+            analogTilt: bundled.analogTilt
+        )
+    }
+
+    private var heldLaunchBinding: Binding<Bool> {
+        Binding(
+            get: { library.heldLaunch != nil },
+            set: { isPresented in
+                if !isPresented {
+                    library.heldLaunch = nil
+                }
+            }
+        )
+    }
+
+    private var launchErrorBinding: Binding<Bool> {
+        Binding(
+            get: { library.launchError != nil },
+            set: { isPresented in
+                if !isPresented {
+                    library.launchError = nil
                 }
             }
         )
@@ -1461,6 +1742,8 @@ private struct LibraryBackground: View {
 private struct GameCard: View {
     let game: GameFile
     let launch: () -> Void
+    let addToHomeScreen: () -> Void
+    let exportApp: () -> Void
     let delete: () -> Void
 
     /// `nil` means this game follows the default core.
@@ -1541,6 +1824,16 @@ private struct GameCard: View {
                     }
                 }
             }
+
+            Button(action: addToHomeScreen) {
+                Label("Add to Home Screen", systemImage: "square.grid.2x2")
+            }
+
+            Button(action: exportApp) {
+                Label("Export as Standalone App", systemImage: "square.and.arrow.up.on.square")
+            }
+
+            Divider()
 
             Button(role: .destructive, action: delete) {
                 Label("Remove from Library", systemImage: "trash")

@@ -10,6 +10,7 @@
 		A20000000000000000000001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000001 /* main.m */; };
 		A20000000000000000000008 /* NativeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3000000000000000000000B /* NativeHost.swift */; };
 		A20000000000000000000009 /* EmulatorCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3000000000000000000000D /* EmulatorCore.swift */; };
+		A2000000000000000000000B /* GameExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3000000000000000000000F /* GameExport.swift */; };
 		A20000000000000000000002 /* touchHLE_fonts in Resources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000004 /* touchHLE_fonts */; };
 		A20000000000000000000003 /* touchHLE_dylibs in Resources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000005 /* touchHLE_dylibs */; };
 		A20000000000000000000004 /* touchHLE_apps in Resources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000006 /* touchHLE_apps */; };
@@ -34,6 +35,7 @@
 		A3000000000000000000000B /* NativeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHost.swift; sourceTree = "<group>"; };
 		A3000000000000000000000C /* TouchHLEHost-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "TouchHLEHost-Bridging-Header.h"; sourceTree = "<group>"; };
 		A3000000000000000000000D /* EmulatorCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorCore.swift; sourceTree = "<group>"; };
+		A3000000000000000000000F /* GameExport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameExport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +66,7 @@
 				A30000000000000000000001 /* main.m */,
 				A3000000000000000000000B /* NativeHost.swift */,
 				A3000000000000000000000D /* EmulatorCore.swift */,
+				A3000000000000000000000F /* GameExport.swift */,
 				A3000000000000000000000C /* TouchHLEHost-Bridging-Header.h */,
 			);
 			path = Sources;
@@ -200,6 +203,7 @@
 				A20000000000000000000001 /* main.m in Sources */,
 				A20000000000000000000008 /* NativeHost.swift in Sources */,
 				A20000000000000000000009 /* EmulatorCore.swift in Sources */,
+				A2000000000000000000000B /* GameExport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

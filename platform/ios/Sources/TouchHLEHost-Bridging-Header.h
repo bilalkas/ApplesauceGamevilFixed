@@ -31,3 +31,22 @@ int32_t touchhle_ios_launch_game(
     int32_t network_access,
     int32_t analog_stick_tilt_controls
 );
+
+#ifdef __OBJC__
+#import <Foundation/Foundation.h>
+
+// A Home Screen icon for a game is a Web Clip pointing at
+// applesauce://launch?file=<name>. SDL owns the scene delegate, so main.m
+// intercepts those URLs on their way through
+// -[SDLUIKitSceneDelegate sendDropFileForURL:] and parks them here.
+
+// Posted with the NSURL as its object when one arrives while the app is
+// already running.
+extern NSString *const ApplesauceDidReceiveLaunchURLNotification;
+
+// The URL the app was opened with, if any. On a cold launch the URL is
+// delivered before SDL_main runs, so the host reads it on startup rather than
+// waiting for the notification it already missed. Taking it clears it, so a
+// deep link is never acted on twice.
+NSURL *_Nullable touchhle_ios_take_pending_launch_url(void);
+#endif
