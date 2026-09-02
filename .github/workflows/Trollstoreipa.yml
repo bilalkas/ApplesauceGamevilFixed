@@ -39,40 +39,25 @@ jobs:
           path: touchhle-core-repo
           submodules: recursive
 
-      # 1. Normale Version bauen
-      - name: Build Applesauce (Standard)
+      - name: Build Applesauce
         env:
           TOUCHHLE_CORE_REPO: ${{ github.workspace }}/touchhle-core-repo
         run: sh platform/ios/scripts/build-host.sh iphoneos Release
 
-      - name: Package IPA (Standard)
+      # Standard and TrollStore differ only in how the .app is packaged --
+      # build-host.sh has no TrollStore mode -- so one build feeds both IPAs.
+      # package-ipa.sh takes the output path as its last argument and creates
+      # the directory itself; without one it writes to dist/ and nothing lands
+      # in the working directory to move.
+      - name: Package IPAs
         run: |
-          sh platform/ios/scripts/package-ipa.sh
-          mkdir -p compiled_ipas/standard
-          mv *.ipa compiled_ipas/standard/
-
-      # 2. TrollStore-Version bauen (falls das Skript ein Argument dafür annimmt, 
-      # alternativ steuert das Makefile/das Build-Skript dies über Umgebungsvariablen)
-      - name: Build Applesauce (TrollStore)
-        env:
-          TOUCHHLE_CORE_REPO: ${{ github.workspace }}/touchhle-core-repo
-          ENABLE_TROLLSTORE: "1" # Je nach Skript-Implementierung (alternativ TROLLSTORE=1 oder passendes Flag)
-        run: |
-          # Falls dein build-host.sh Skript ein Argument für Trollstore verlangt:
-          # sh platform/ios/scripts/build-host.sh iphoneos Release trollstore
-          # Ansonsten den Build-Prozess für das TrollStore-Target triggern:
-          sh platform/ios/scripts/build-host.sh iphoneos Release
-
-      - name: Package IPA (TrollStore)
-        run: |
-          # Hier sicherstellen, dass das Packaging-Skript die TrollStore-Variante greift
-          # Ggf. musst du das Paket vor dem Umbenennen sichern:
-          sh platform/ios/scripts/package-ipa.sh
-          mkdir -p compiled_ipas/trollstore
-          mv *.ipa compiled_ipas/trollstore/
+          sh platform/ios/scripts/package-ipa.sh \
+            compiled_ipas/standard/Applesauce-iOS-unsigned.ipa
+          sh platform/ios/scripts/package-ipa.sh --trollstore \
+            compiled_ipas/trollstore/Applesauce-iOS-trollstore.ipa
 
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
         with:
           name: Applesauce-iOS-Builds
-          path: compiled_ipas/**/*.ipa
+          path: compiled_ipas/**
