@@ -1204,46 +1204,7 @@ private struct LibraryView: View {
                             spacing: 16
                         ) {
                             ForEach(library.games) { game in
-                                GameCard(
-                                    game: game,
-                                    launch: {
-                                        library.launch(
-                                            game,
-                                            scaleHack: scaleHack,
-                                            orientation: orientation,
-                                            networkAccess: networkAccess,
-                                            analogTilt: analogTilt
-                                        )
-                                    },
-                                    addToHomeScreen: {
-                                        export.addToHomeScreen(
-                                            GameExportModel.HomeScreenRequest(
-                                                fileName: game.url.lastPathComponent,
-                                                displayName: game.displayName,
-                                                bundleIdentifier: game.bundleIdentifier,
-                                                icon: game.icon
-                                            )
-                                        )
-                                    },
-                                    exportApp: {
-                                        export.exportStandaloneApp(
-                                            .make(
-                                                gameURL: game.url,
-                                                displayName: game.displayName,
-                                                bundleIdentifier: game.bundleIdentifier,
-                                                icon: game.icon,
-                                                core: CoreSelection.kind(
-                                                    forBundleIdentifier: game.bundleIdentifier
-                                                ),
-                                                scaleHack: scaleHack,
-                                                orientation: orientation,
-                                                networkAccess: networkAccess,
-                                                analogTilt: analogTilt
-                                            )
-                                        )
-                                    },
-                                    delete: { library.delete(game) }
-                                )
+                                card(for: game)
                             }
                         }
                         .padding(.horizontal, 18)
@@ -1368,6 +1329,59 @@ private struct LibraryView: View {
         ) { _ in
             startPendingDeepLink()
         }
+    }
+
+    /// One grid tile.
+    ///
+    /// This lives outside `body` on purpose. Inlined, its five closures pushed
+    /// the enclosing `LazyVGrid` past what the Swift type checker will solve in
+    /// its time budget, and the build failed with "unable to type-check this
+    /// expression in reasonable time". A function with a written-out parameter
+    /// type is a separate, small problem for it to solve.
+    private func card(for game: GameFile) -> GameCard {
+        GameCard(
+            game: game,
+            launch: { start(game) },
+            addToHomeScreen: { addToHomeScreen(game) },
+            exportApp: { exportApp(game) },
+            delete: { library.delete(game) }
+        )
+    }
+
+    private func start(_ game: GameFile) {
+        library.launch(
+            game,
+            scaleHack: scaleHack,
+            orientation: orientation,
+            networkAccess: networkAccess,
+            analogTilt: analogTilt
+        )
+    }
+
+    private func addToHomeScreen(_ game: GameFile) {
+        let request = GameExportModel.HomeScreenRequest(
+            fileName: game.url.lastPathComponent,
+            displayName: game.displayName,
+            bundleIdentifier: game.bundleIdentifier,
+            icon: game.icon
+        )
+        export.addToHomeScreen(request)
+    }
+
+    private func exportApp(_ game: GameFile) {
+        let core = CoreSelection.kind(forBundleIdentifier: game.bundleIdentifier)
+        let request = StandaloneApp.Request.make(
+            gameURL: game.url,
+            displayName: game.displayName,
+            bundleIdentifier: game.bundleIdentifier,
+            icon: game.icon,
+            core: core,
+            scaleHack: scaleHack,
+            orientation: orientation,
+            networkAccess: networkAccess,
+            analogTilt: analogTilt
+        )
+        export.exportStandaloneApp(request)
     }
 
     /// Starts the game a Home Screen icon asked for, if one did.
