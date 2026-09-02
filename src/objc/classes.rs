@@ -16,6 +16,7 @@ use super::{
     IMP, SEL,
 };
 use crate::bundle;
+use crate::libc::cxxabi::{note_exception_throw, unwind_to_app_frame, THROW_LOOP_LIMIT};
 use crate::mach_o::MachO;
 use crate::mem::{
     guest_size_of, ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutVoidPtr, Ptr, SafeRead,
@@ -1200,64 +1201,76 @@ pub fn objc_getClass(env: &mut crate::Environment, name: ConstPtr<u8>) -> Class 
     nil
 }
 
-pub fn objc_begin_catch(env: &mut crate::Environment, name: ConstPtr<u8>) -> Class {
-    if name.is_null() {
-        return nil;
-    }
-
-    let name_str = match env.mem.cstr_at_utf8(name) {
-        Ok(s) => s.to_string(),
-        Err(_) => return nil,
-    };
-    if let Some(class) = env.objc.get_class(&name_str, false, &env.mem) {
-        return class;
-    }
-
-    if ObjC::find_template(&name_str).is_some() {
-        return env.objc.link_class(&name_str, false, &mut env.mem);
-    }
-
-    nil
+/// `id objc_begin_catch(void *exc_buf)` — entering an `@catch` block.
+///
+/// The real runtime pushes the exception onto the thread's catch stack and
+/// hands the handler the exception object. touchHLE's exception bypass
+/// unwinds *past* `@catch` blocks (see [objc_exception_throw]), so this
+/// normally never runs; if it does, return the object unchanged so the
+/// handler at least gets something valid.
+pub fn objc_begin_catch(_env: &mut crate::Environment, exc_buf: MutVoidPtr) -> id {
+    exc_buf.cast()
 }
 
-pub fn objc_end_catch(env: &mut crate::Environment, name: ConstPtr<u8>) -> Class {
-    if name.is_null() {
-        return nil;
-    }
+/// `void objc_end_catch(void)` — leaving an `@catch` block. There is nothing
+/// to undo, see [objc_begin_catch].
+pub fn objc_end_catch(_env: &mut crate::Environment) {}
 
-    let name_str = match env.mem.cstr_at_utf8(name) {
-        Ok(s) => s.to_string(),
-        Err(_) => return nil,
+/// `void objc_exception_throw(id exception)` — the Objective-C runtime's
+/// exception entry point. Both `@throw` and `-[NSException raise]` funnel
+/// through it, and on a real device it never returns.
+///
+/// touchHLE has no unwinder, so we use the same frame-pointer approximation
+/// as the C++ exception bypass: the guest function that threw is made to
+/// return 0/nil to *its* caller. See [crate::libc::cxxabi] for the caveats,
+/// and note that this may only be called from the outermost host frame of a
+/// guest-to-host call.
+pub fn objc_exception_throw(env: &mut crate::Environment, exception: id) {
+    let class_name = if exception.is_null() {
+        "nil".to_owned()
+    } else {
+        let objc_obj: objc_object = env.mem.read(exception.cast());
+        env.objc
+            .try_get_class_name(objc_obj.isa)
+            .unwrap_or("(unknown class)")
+            .to_owned()
     };
-    if let Some(class) = env.objc.get_class(&name_str, false, &env.mem) {
-        return class;
+
+    // Rate-limited, and bounded: a guest that re-throws every time we return
+    // it to its caller would otherwise spin forever.
+    let count = note_exception_throw(&format!("objc_exception_throw:{}", class_name));
+    let should_log = count <= 3 || count.is_multiple_of(64);
+    if should_log {
+        log!(
+            "Guest threw an Objective-C exception ({} {:?}, consecutive #{}): \
+             touchHLE has no real unwinder, so we unwind to the nearest \
+             app-level frame via the frame-pointer chain.",
+            class_name,
+            exception,
+            count
+        );
+    }
+    if count >= THROW_LOOP_LIMIT {
+        if should_log {
+            log!(
+                "Warning: Objective-C exception loop detected ({} thrown {} times \
+                 in a row). Returning to the thrower to break the loop; the guest \
+                 will likely abort or hang shortly.",
+                class_name,
+                count
+            );
+        }
+        return;
     }
 
-    if ObjC::find_template(&name_str).is_some() {
-        return env.objc.link_class(&name_str, false, &mut env.mem);
+    if !unwind_to_app_frame(env) && should_log {
+        log!(
+            "Warning: Could not unwind past Objective-C exception ({}); no \
+             app-level frame on the stack. Returning to the thrower; guest will \
+             likely abort.",
+            class_name
+        );
     }
-
-    nil
-}
-
-pub fn objc_exception_throw(env: &mut crate::Environment, name: ConstPtr<u8>) -> Class {
-    if name.is_null() {
-        return nil;
-    }
-
-    let name_str = match env.mem.cstr_at_utf8(name) {
-        Ok(s) => s.to_string(),
-        Err(_) => return nil,
-    };
-    if let Some(class) = env.objc.get_class(&name_str, false, &env.mem) {
-        return class;
-    }
-
-    if ObjC::find_template(&name_str).is_some() {
-        return env.objc.link_class(&name_str, false, &mut env.mem);
-    }
-
-    nil
 }
 
 pub fn object_getClassName(env: &mut crate::Environment, obj: id) -> Class {

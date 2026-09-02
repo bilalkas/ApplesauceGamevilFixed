@@ -104,7 +104,21 @@ fn __cxa_guard_abort(env: &mut Environment, guard: MutPtr<u8>) {
 
 const APP_CODE_LIMIT: u32 = 0x1000_0000;
 
-fn unwind_to_app_frame(env: &mut Environment) -> bool {
+/// Approximate an exception unwind: return control to the nearest app-level
+/// frame on the guest stack. See the module comment above for the caveats.
+///
+/// Returns `false` if no suitable frame was found, in which case nothing was
+/// modified and the caller should just return to the guest normally.
+///
+/// **This must only be called from the outermost host frame of a
+/// guest-to-host call.** [crate::abi::CallFromHost] saves and restores SP
+/// around the call, so a host function that calls this from inside a nested
+/// `msg![]`/`call_from_host` would have its new SP thrown away on the way
+/// out, leaving the guest running the unwound-to frame with the wrong stack
+/// pointer. [crate::abi::CallFromGuest] (the path used for SVC stubs and for
+/// host method IMPs invoked by `objc_msgSend`) does not touch SP, so calling
+/// this directly from such a function is fine.
+pub(crate) fn unwind_to_app_frame(env: &mut Environment) -> bool {
     // The thread's stack typically lives at the top of the 4 GiB guest
     // address space (e.g. SP ≈ 0xffffee40). Use the recorded stack range
     // when available — otherwise fall back to "any non-zero, non-all-ones
@@ -140,6 +154,16 @@ fn unwind_to_app_frame(env: &mut Environment) -> bool {
             regs[FRAME_POINTER] = prev_fp;
             regs[Cpu::SP] = fp + 8;
             regs[0] = 0;
+            // LR has to be redirected as well, not just PC. Symbol stubs with
+            // a 4-byte entry size have no room for a return instruction after
+            // the SVC, so they are linked with SVC_LAZY_LINK_RET_FLAG and
+            // Environment::handle_cpu_state performs the return itself by
+            // branching to LR *after* the host function has returned — which
+            // would undo the branch below. Pointing LR at the same target
+            // makes both stub layouts end up in the same place. The frame we
+            // return into restores its own LR from its own stack frame, so
+            // clobbering it here is harmless.
+            regs[Cpu::LR] = lr;
             env.cpu.branch(GuestFunction::from_addr_with_thumb_bit(lr));
             return true;
         }
@@ -154,14 +178,15 @@ fn unwind_to_app_frame(env: &mut Environment) -> bool {
 // immediately re-throws (classic example: `operator new` in a loop that
 // keeps getting NULL from a refused huge `malloc`, throwing `bad_alloc`
 // every iteration — see P. Harvest, which spins on malloc(0x4420000c)).
-// Both the Itanium (`__cxa_throw`) and the SjLj (`_Unwind_SjLj_*`) entry
-// points funnel through here so neither can hang the emulator forever.
+// The Itanium (`__cxa_throw`), SjLj (`_Unwind_SjLj_*`) and Objective-C
+// (`objc_exception_throw`, `-[NSException raise]`) entry points all funnel
+// through here so none of them can hang the emulator forever.
 //
 // Returns the number of consecutive throws that share the same `key`.
 
-const THROW_LOOP_LIMIT: u32 = 512;
+pub(crate) const THROW_LOOP_LIMIT: u32 = 512;
 
-fn note_exception_throw(key: &str) -> u32 {
+pub(crate) fn note_exception_throw(key: &str) -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static LAST_THROW_KEY: Mutex<String> = Mutex::new(String::new());
     static SAME_KEY_COUNT: AtomicU32 = AtomicU32::new(0);

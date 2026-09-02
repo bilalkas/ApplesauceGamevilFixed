@@ -10,15 +10,24 @@
 //! `description`, copy semantics, and the uncaught-exception handler stub.
 //!
 //! ### On `raise`
-//! In real Objective-C, `-[NSException raise]` unwinds the call stack via
-//! C++ exceptions.  touchHLE does not emulate ObjC exception unwinding, so we
-//! instead call `panic!` which terminates the guest with a clear diagnostic.
-//! This is the same behaviour as the original touchHLE approach for unhandled
-//! guest panics, and is far better than silently continuing past a `raise`
-//! (which produces mysterious NULL-deref crashes later, as seen in the
-//! KamiChallenge log).
+//! In real Objective-C, `-[NSException raise]` is `objc_exception_throw(self)`:
+//! it unwinds the call stack to the enclosing `@catch`, and if there is none it
+//! calls the uncaught-exception handler and aborts. touchHLE has no unwinder,
+//! so we use the same frame-pointer approximation as the C++ exception bypass
+//! (see [crate::libc::cxxabi]): the guest function that raised is made to
+//! return 0/nil to *its* caller. The `@catch` block itself never runs and
+//! `@finally` is skipped, but the throw does leave the function that decided it
+//! cannot continue, which is what guest error handling relies on.
+//!
+//! Simply returning to the raiser — what this file used to do — is much worse:
+//! the guest carries on inside a function that has already given up. Zenonia 2
+//! shows the failure mode clearly. When Gamevil's (long dead) profile server
+//! doesn't answer, its socket wrapper raises `Socket: Send failed`, `-raise`
+//! returns, the wrapper retries, and the main thread wedges in an endless raise
+//! loop until iOS' watchdog kills the app.
 
 use crate::dyld::{ConstantExports, FunctionExports, HostConstant};
+use crate::libc::cxxabi::{note_exception_throw, unwind_to_app_frame, THROW_LOOP_LIMIT};
 use crate::mem::MutVoidPtr;
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
@@ -47,6 +56,63 @@ fn objc_str(env: &mut Environment, s: id, fallback: &str) -> String {
         return fallback.to_string();
     }
     super::ns_string::to_rust_string(env, s).into_owned()
+}
+
+/// Shared implementation of `-[NSException raise]` and
+/// `+[NSException raise:format:]`: log the exception, then approximate the
+/// unwind (see the module comment).
+///
+/// This must only be called from a host method that the guest invoked
+/// directly, never from inside a host-initiated `msg![]` — see
+/// [unwind_to_app_frame] for why. That is the reason `+raise:format:` calls
+/// this instead of sending `-raise` to the exception it just built.
+fn raise_and_unwind(env: &mut Environment, exception: id) {
+    let (name, reason, user_info) = {
+        let host = env.objc.borrow::<NSExceptionHostObject>(exception);
+        (host.name, host.reason, host.user_info)
+    };
+    let name_s = objc_str(env, name, "<unnamed exception>");
+    let reason_s = objc_str(env, reason, "<no reason>");
+
+    // Rate-limit the log. A guest stuck in a raise loop would otherwise spend
+    // all of its time writing to the log, which on its own is enough to make
+    // the app look frozen.
+    let count = note_exception_throw(&format!("nsexception:{}", name_s));
+    let should_log = count <= 3 || count.is_multiple_of(64);
+    if should_log {
+        log!(
+            "GUEST NSException raised (consecutive #{}): name={:?}, reason={:?}{}",
+            count,
+            name_s,
+            reason_s,
+            if user_info != nil {
+                ", userInfo=<present>"
+            } else {
+                ""
+            }
+        );
+    }
+
+    if count >= THROW_LOOP_LIMIT {
+        if should_log {
+            log!(
+                "Warning: NSException loop detected ({:?} raised {} times in a \
+                 row). Returning to the raiser to break the loop; the guest will \
+                 likely abort or hang shortly.",
+                name_s,
+                count
+            );
+        }
+        return;
+    }
+
+    if !unwind_to_app_frame(env) && should_log {
+        log!(
+            "Warning: could not unwind past NSException {:?}; no app-level frame \
+             on the stack. Returning to the raiser; the guest will likely abort.",
+            name_s
+        );
+    }
 }
 
 #[derive(Default)]
@@ -86,13 +152,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 // `+raise:format:` — convenience that creates and immediately raises.
 // The `format` parameter is treated as a plain reason string (no printf
 // substitution) because varargs are not supported in touchHLE HLE stubs.
+// Note this deliberately does *not* send `-raise` to the new exception: the
+// unwind has to happen in the host method the guest called, not in a nested
+// host-to-host message send.
 + (())raise:(id)name   // NSString*  (exception name)
        format:(id)fmt  // NSString*  (reason / format string)
 {
     let exc: id = msg_class![env; NSException exceptionWithName:name
                                                          reason:fmt
                                                        userInfo:nil];
-    () = msg![env; exc raise];
+    raise_and_unwind(env, exc);
 }
 
 // MARK: - Designated initialiser
@@ -140,25 +209,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 // MARK: - raise
 
 - (())raise {
-    let name   = env.objc.borrow::<NSExceptionHostObject>(this).name;
-    let reason = env.objc.borrow::<NSExceptionHostObject>(this).reason;
-
-    let name_s   = objc_str(env, name,   "<unnamed exception>");
-    let reason_s = objc_str(env, reason, "<no reason>");
-
-    // Log the exception details clearly for debugging
-    log!("GUEST NSException raised (Continuing without panic):");
-    log!("  Name:   {}", name_s);
-    log!("  Reason: {}", reason_s);
-
-    // If there is userInfo, log it too (useful for network errors)
-    let user_info = env.objc.borrow::<NSExceptionHostObject>(this).user_info;
-    if user_info != nil {
-        log!("  UserInfo: <present>");
-    }
-
-    // We return () to the guest.
-    // The guest will now continue execution.
+    raise_and_unwind(env, this);
 }
 
 // MARK: - NSCopying

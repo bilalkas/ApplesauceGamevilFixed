@@ -406,7 +406,7 @@ const FUNCTIONS: FunctionExports = &[
     export_c_func!(objc_setProperty_nonatomic(_, _, _, _)),
     export_c_func!(objc_exception_throw(_)),
     export_c_func!(objc_begin_catch(_)),
-    export_c_func!(objc_end_catch(_)),
+    export_c_func!(objc_end_catch()),
     export_c_func!(class_getSuperclass(_)),
     export_c_func!(class_getInstanceSize(_, _)),
     export_c_func!(class_getInstanceMethod(_, _)),

@@ -669,13 +669,36 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     std::mem::drop(gles);
 
-    let Some(&drawable) = env
+    // Resolved into a local first so the `RefCell` guard and the `env.objc`
+    // borrow are both gone before the failure branch runs — it needs `env`
+    // mutably for the framerate sleep.
+    let maybe_drawable = env
         .objc
         .borrow::<EAGLContextHostObject>(this)
         .renderbuffer_drawable_bindings
         .borrow()
-        .get(&renderbuffer) else {
+        .get(&renderbuffer)
+        .copied();
+
+    let Some(drawable) = maybe_drawable else {
+        // This used to be a log_dbg!, which made the most damaging failure
+        // mode in this file completely invisible in a normal log: the frame
+        // counter above has already been bumped, so the log still shows a
+        // healthy render loop while every single frame is being thrown away
+        // here. Say it out loud once instead.
+        log_once!(
+            "Warning: can't present renderbuffer {} — it is not bound to a drawable. \
+             Frames will be dropped until the app binds a drawable-backed renderbuffer \
+             again [this log will only be shown once]",
+            renderbuffer
+        );
         log_dbg!("Can't present a renderbuffer {:?} not bound to a drawable!", renderbuffer);
+        // Returning without this used to leak the framerate limiter's sleep,
+        // so an app stuck in this state spun at whatever rate the guest's
+        // render loop could manage.
+        if let Some(sleep_for) = sleep_for {
+            env.sleep(sleep_for);
+        }
         return false;
     };
 
@@ -1767,6 +1790,12 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
     // glEnableClientState / glVertexPointer. Use a small dedicated
     // shader-based presenter instead.
     if gles.is_es2() {
+        use crate::gles::gles2_raw as gles2;
+        // Saved before the swap for the same reason as on the ES 1.1 path
+        // below: SDL's `-swapBuffers` binds its own view renderbuffer and
+        // leaves it bound, which would make every later `presentRenderbuffer:`
+        // fail its `renderbuffer_drawable_bindings` lookup and be dropped.
+        let old_renderbuffer: GLuint = get_int(gles, gles2::RENDERBUFFER_BINDING) as _;
         present_renderbuffer_es2(
             gles,
             drawable_framebuffer,
@@ -1776,6 +1805,12 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         );
         std::mem::drop(gles_boxed);
         env.window.as_ref().unwrap().swap_window();
+        {
+            let mut gles_boxed = gles_ctx.make_current(env.window.as_mut().unwrap());
+            gles_boxed
+                .as_mut()
+                .BindRenderbuffer(gles2::RENDERBUFFER, old_renderbuffer);
+        }
         if overlay_scene.is_some() {
             // TODO: the ES 2 presenter has no overlay support yet, so UIKit
             //       content stays invisible on that path.
@@ -2677,7 +2712,21 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
         );
     }
 
-    // Restore the other bindings
+    // Restore the other bindings.
+    //
+    // The renderbuffer binding matters as much as the framebuffer one on iOS:
+    // our SDL's `-[SDL_uikitopenglview swapBuffers]` does
+    // `glBindRenderbuffer(GL_RENDERBUFFER, viewRenderbuffer)` right before
+    // `-presentRenderbuffer:`, so the swap above silently replaced the guest's
+    // renderbuffer binding with SDL's own. Leaving it that way is fatal, not
+    // cosmetic: `presentRenderbuffer:` identifies the drawable by looking up
+    // `GL_RENDERBUFFER_BINDING_OES` in `renderbuffer_drawable_bindings`, so
+    // every later frame would miss and be dropped without reaching here. Apps
+    // that rebind their colour renderbuffer each frame (Apple's EAGLView
+    // template) never noticed; ones that bind it once in `createFramebuffer`
+    // — e.g. Gamevil's Air Penguin — got exactly one visible frame per
+    // surface creation and then a frozen picture with working audio.
+    gles.BindRenderbufferOES(gles11::RENDERBUFFER_OES, renderbuffer);
     gles.BindTexture(gles11::TEXTURE_2D, old_texture_2d);
     gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, old_framebuffer);
     {
@@ -2687,7 +2736,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, context: id, skip_device_r
             gles,
             trace_gl_errors,
             &SEEN,
-            "after BindTexture + BindFramebufferOES restore",
+            "after BindRenderbufferOES + BindTexture + BindFramebufferOES restore",
         );
     }
 
