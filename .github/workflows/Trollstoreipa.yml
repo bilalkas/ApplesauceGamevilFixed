@@ -1,0 +1,78 @@
+name: Build iOS IPA troll
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust for iOS
+        run: rustup target add aarch64-apple-ios
+
+      - name: Install tools
+        run: brew install ldid cmake
+
+      - name: Download Boost
+        run: |
+          curl -L https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.gz -o boost.tar.gz
+          mkdir -p vendor/boost
+          tar xzf boost.tar.gz -C vendor/boost --strip-components=1
+
+      - name: Build SDL
+        run: sh platform/ios/scripts/build-sdl-shared.sh iphoneos
+
+      - name: Patch WIPI Resource Assertion for Zenonia 3
+        run: |
+          find . -name "MCknl.m" -exec sed -i '' 's/Assertion failed: (0)/\/\/ Assertion bypassed/g' {} +
+
+      - name: Checkout alternative touchHLE Core
+        uses: actions/checkout@v4
+        with:
+          repository: johnny901901901/touchHLE
+          ref: ios-core-dylib
+          path: touchhle-core-repo
+          submodules: recursive
+
+      # 1. Normale Version bauen
+      - name: Build Applesauce (Standard)
+        env:
+          TOUCHHLE_CORE_REPO: ${{ github.workspace }}/touchhle-core-repo
+        run: sh platform/ios/scripts/build-host.sh iphoneos Release
+
+      - name: Package IPA (Standard)
+        run: |
+          sh platform/ios/scripts/package-ipa.sh
+          mkdir -p compiled_ipas/standard
+          mv *.ipa compiled_ipas/standard/
+
+      # 2. TrollStore-Version bauen (falls das Skript ein Argument dafür annimmt, 
+      # alternativ steuert das Makefile/das Build-Skript dies über Umgebungsvariablen)
+      - name: Build Applesauce (TrollStore)
+        env:
+          TOUCHHLE_CORE_REPO: ${{ github.workspace }}/touchhle-core-repo
+          ENABLE_TROLLSTORE: "1" # Je nach Skript-Implementierung (alternativ TROLLSTORE=1 oder passendes Flag)
+        run: |
+          # Falls dein build-host.sh Skript ein Argument für Trollstore verlangt:
+          # sh platform/ios/scripts/build-host.sh iphoneos Release trollstore
+          # Ansonsten den Build-Prozess für das TrollStore-Target triggern:
+          sh platform/ios/scripts/build-host.sh iphoneos Release
+
+      - name: Package IPA (TrollStore)
+        run: |
+          # Hier sicherstellen, dass das Packaging-Skript die TrollStore-Variante greift
+          # Ggf. musst du das Paket vor dem Umbenennen sichern:
+          sh platform/ios/scripts/package-ipa.sh
+          mkdir -p compiled_ipas/trollstore
+          mv *.ipa compiled_ipas/trollstore/
+
+      - name: Upload IPAs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Applesauce-iOS-Builds
+          path: compiled_ipas/**/*.ipa
