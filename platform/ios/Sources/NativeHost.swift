@@ -1308,8 +1308,11 @@ private struct LibraryView: View {
             startPendingDeepLink()
         }
         .onReceive(
+            // Not wrapped in `Notification.Name(...)`: the constant's name ends
+            // in "Notification", so Swift already imports it as a
+            // `NSNotification.Name` rather than as a `String`.
             NotificationCenter.default.publisher(
-                for: Notification.Name(ApplesauceDidReceiveLaunchURLNotification)
+                for: ApplesauceDidReceiveLaunchURLNotification
             )
         ) { _ in
             startPendingDeepLink()

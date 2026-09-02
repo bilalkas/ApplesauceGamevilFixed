@@ -45,7 +45,12 @@ if [ -n "${TOUCHHLE_CORE_REPO:-}" ]; then
         sh "$ROOT/scripts/build-rust.sh" "$RUST_TARGET" "$CONFIGURATION"
 fi
 
+# -quiet: without it xcodebuild echoes every compiler invocation, and the few
+# thousand lines of that bury the actual diagnostic so deeply that a CI log tail
+# contains no "error:" line at all. With it, only warnings and errors are
+# printed, so a failing build's output *is* the reason it failed.
 xcodebuild \
+    -quiet \
     -project "$ROOT/TouchHLEHost.xcodeproj" \
     -scheme TouchHLEHost \
     -configuration "$CONFIGURATION" \
