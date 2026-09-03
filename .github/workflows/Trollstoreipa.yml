@@ -45,18 +45,75 @@ jobs:
         run: sh platform/ios/scripts/build-host.sh iphoneos Release
 
       # Standard and TrollStore differ only in how the .app is packaged --
-      # build-host.sh has no TrollStore mode -- so one build feeds both IPAs.
-      # package-ipa.sh takes the output path as its last argument and creates
-      # the directory itself; without one it writes to dist/ and nothing lands
-      # in the working directory to move.
+      # build-host.sh has no TrollStore mode -- so one build feeds all three
+      # IPAs. package-ipa.sh takes the output path as its last argument and
+      # creates the directory itself; without one it writes to dist/ and
+      # nothing lands in the working directory to move.
       - name: Package IPAs
         run: |
           sh platform/ios/scripts/package-ipa.sh \
             compiled_ipas/standard/Applesauce-iOS-unsigned.ipa
           sh platform/ios/scripts/package-ipa.sh --trollstore \
             compiled_ipas/trollstore/Applesauce-iOS-trollstore.ipa
+          # A11 and older only (iPhone X / 8 and earlier). There, the
+          # dynamic-codesigning entitlement grants JIT outright, so nothing has
+          # to attach to the process -- which is the whole of what TrollStore's
+          # per-launch "Enable JIT" does, and the step that fails on that
+          # hardware. On A12+ this build crashes on launch instead; iOS 15 bans
+          # the entitlement there.
+          sh platform/ios/scripts/package-ipa.sh --trollstore-permanent-jit \
+            compiled_ipas/trollstore-permanent-jit/Applesauce-iOS-trollstore-permanent-jit.ipa
+
+      - name: Write install notes
+        run: |
+          cat >compiled_ipas/WHICH-IPA.txt <<'NOTES'
+          Applesauce -- which IPA to install
+
+            standard/                 iOS 17.4+. Sideload with AltStore or
+                                      Sideloadly, then use StikDebug's bolt
+                                      button inside the app before each session.
+
+            trollstore/               iOS 15.0-17.0 with TrollStore, on A12 and
+                                      newer (iPhone XS/XR onwards). Install in
+                                      TrollStore, then TrollStore -> Applesauce
+                                      -> Enable JIT. This has to be redone every
+                                      time Applesauce starts as a new process.
+
+            trollstore-permanent-jit/ iOS 15.0-17.0 with TrollStore, on A11 and
+                                      older (iPhone X, iPhone 8 and earlier).
+                                      JIT is always on; nothing to enable.
+                                      CRASHES ON LAUNCH on A12 and newer.
+
+          The two TrollStore IPAs are ad-hoc fakesigned and carry no personal
+          signing material. Pick by chip, not by iOS version -- installing the
+          permanent-JIT build on A12+ hardware is the one combination that fails
+          immediately and every time.
+
+          If a game closes the moment it starts, JIT was not on. If the app
+          itself dies, send Documents/touchhle-host.log from
+          On My iPhone -> Applesauce (check it for personal data first) along
+          with the iPhone model and iOS version.
+          NOTES
+
+      # Advisory rather than a gate: this check has never run in CI, and its
+      # "no /Users/ path anywhere in the bundle" rule can trip on paths Rust
+      # bakes into the core dylibs. The entitlement checks are the ones that
+      # matter -- above all that the ordinary TrollStore IPA does not carry
+      # dynamic-codesigning, which crashes every A12 and newer device on launch.
+      - name: Verify IPAs
+        continue-on-error: true
+        run: |
+          status=0
+          sh platform/ios/scripts/verify-ipa.sh \
+            compiled_ipas/standard/Applesauce-iOS-unsigned.ipa || status=1
+          sh platform/ios/scripts/verify-ipa.sh --trollstore \
+            compiled_ipas/trollstore/Applesauce-iOS-trollstore.ipa || status=1
+          sh platform/ios/scripts/verify-ipa.sh --trollstore-permanent-jit \
+            compiled_ipas/trollstore-permanent-jit/Applesauce-iOS-trollstore-permanent-jit.ipa || status=1
+          exit $status
 
       - name: Upload IPAs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Applesauce-iOS-Builds

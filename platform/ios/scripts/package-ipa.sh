@@ -119,6 +119,18 @@ STRIP_TOOL=$(xcrun --find strip)
 if [ -n "$ENTITLEMENTS" ]; then
     ldid "-S$ENTITLEMENTS" "$STAGE/Payload/Applesauce.app/Applesauce"
     echo "Fakesigned with entitlements from $ENTITLEMENTS"
+
+    # build-host.sh builds with CODE_SIGNING_ALLOWED=NO, so Embed-Cores leaves
+    # SDL and the core dylibs unsigned. That is correct for the plain IPA --
+    # the signer the user runs handles Frameworks itself -- but a fakesigned
+    # IPA is meant to install as it stands, and dyld will not load an unsigned
+    # dylib into a signed process. Entitlements belong to the executable
+    # alone; the libraries only need a signature.
+    for library in "$STAGE/Payload/Applesauce.app/Frameworks"/*.dylib; do
+        [ -f "$library" ] || continue
+        ldid -S "$library"
+        echo "Fakesigned $(basename "$library")"
+    done
 fi
 
 (
