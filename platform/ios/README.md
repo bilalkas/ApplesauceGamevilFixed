@@ -170,7 +170,9 @@ Treat the pairing file as private device material. Never upload or attach it to 
 
 ### TrollStore
 
-On iOS 15.0–17.0 with TrollStore installed, use one of the `-trollstore` IPAs above. Install it in TrollStore, then use TrollStore's **Enable JIT** on Applesauce before starting a game; it has to be redone whenever the app starts as a new process. The bolt button does not appear in these builds, because StikDebug cannot help below iOS 17.4.
+On iOS 15.0–17.0 with TrollStore installed, use one of the `-trollstore` IPAs above. Install it in TrollStore, then use TrollStore's **Enable JIT** on Applesauce before starting a game; it has to be redone whenever the app starts as a new process.
+
+The app recognises a TrollStore install — only those builds can carry `com.apple.developer.kernel.extended-virtual-addressing` — and adjusts what it offers. The StikDebug bolt button is hidden, because StikDebug needs iOS 17.4 and TrollStore does not reach it, and the "JIT Isn't Enabled" alert offers **Check Again** instead of a StikDebug link that would do nothing. Enable JIT in TrollStore, return to Applesauce, and tap Check Again.
 
 On A11 and older devices the permanent-JIT build skips all of that — JIT is granted by the `dynamic-codesigning` entitlement and never has to be re-enabled. The app detects this and hides the JIT prompts entirely.
 

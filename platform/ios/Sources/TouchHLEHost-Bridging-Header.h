@@ -11,6 +11,12 @@ bool touchhle_ios_jit_available(void);
 // time the app starts as a new process; the entitlement does not.
 bool touchhle_ios_jit_is_from_debugger(void);
 
+// Whether this is one of the TrollStore IPAs rather than a sideloaded one.
+// The two enable JIT by routes that cannot substitute for each other, so the
+// UI has to offer the right one. See main.m for how it is told apart, and why
+// the answer is only ever used to choose wording.
+bool touchhle_ios_is_trollstore_install(void);
+
 // The emulator core lives in a dylib that the app loads at runtime (see
 // EmulatorCore.swift), so its entry points are found with dlsym rather than
 // declared here. Only the SDL shim below is part of the app binary.

@@ -361,6 +361,26 @@ private final class GameLibrary: ObservableObject {
         )
     }
 
+    /// Looks again after the user has gone somewhere else to turn JIT on.
+    ///
+    /// TrollStore's Enable JIT and AltJIT both happen outside this app and can
+    /// be abandoned halfway, so this re-checks rather than assuming it worked:
+    /// `launch` holds the game back again if JIT is still off, and starting
+    /// without it would kill the process. Deferred by one turn because it runs
+    /// from an alert button, and re-presenting an alert while the previous one
+    /// is still dismissing loses it.
+    func retryHeldLaunch(_ held: HeldLaunch) {
+        DispatchQueue.main.async { [weak self] in
+            self?.launch(
+                held.game,
+                scaleHack: held.scaleHack,
+                orientation: held.orientation,
+                networkAccess: held.networkAccess,
+                analogTilt: held.analogTilt
+            )
+        }
+    }
+
     private func start(
         _ game: GameFile,
         scaleHack: Int,
@@ -1272,9 +1292,19 @@ private struct LibraryView: View {
                 isPresented: heldLaunchBinding,
                 presenting: library.heldLaunch
             ) { held in
-                Button("Enable JIT") {
-                    if let url = StikDebug.enableJITURL {
-                        openURL(url)
+                // StikDebug is the only route the app can start by itself. On
+                // a TrollStore or AltJIT install its URL scheme does nothing at
+                // all, so offer a re-check rather than a button that cannot
+                // work — enabling JIT there happens in another app entirely.
+                if JITMethod.current.isSelfService {
+                    Button("Enable JIT") {
+                        if let url = StikDebug.enableJITURL {
+                            openURL(url)
+                        }
+                    }
+                } else {
+                    Button("Check Again") {
+                        library.retryHeldLaunch(held)
                     }
                 }
                 Button("Start Anyway", role: .destructive) {
@@ -1495,9 +1525,19 @@ private struct StandaloneGameView: View {
                 isPresented: heldLaunchBinding,
                 presenting: library.heldLaunch
             ) { held in
-                Button("Enable JIT") {
-                    if let url = StikDebug.enableJITURL {
-                        openURL(url)
+                // StikDebug is the only route the app can start by itself. On
+                // a TrollStore or AltJIT install its URL scheme does nothing at
+                // all, so offer a re-check rather than a button that cannot
+                // work — enabling JIT there happens in another app entirely.
+                if JITMethod.current.isSelfService {
+                    Button("Enable JIT") {
+                        if let url = StikDebug.enableJITURL {
+                            openURL(url)
+                        }
+                    }
+                } else {
+                    Button("Check Again") {
+                        library.retryHeldLaunch(held)
                     }
                 }
                 Button("Start Anyway", role: .destructive) {
@@ -1651,36 +1691,59 @@ private enum StikDebug {
 }
 
 /// How this install can get JIT, which decides what the UI should offer.
+///
+/// The three release IPAs are one build with three sets of entitlements, so
+/// this is worked out at runtime rather than compiled in. Getting it wrong is
+/// not cosmetic: each route is enabled from a different place, and none of them
+/// can stand in for another.
 private enum JITMethod {
     /// TrollStore granted `dynamic-codesigning`: JIT is on and stays on.
     case permanent
     /// StikDebug can attach on demand, from inside the app (iOS 17.4+).
     case stikDebug
-    /// A debugger has to be attached from outside before the game starts —
-    /// TrollStore's "Enable JIT" below iOS 17.4, or AltJIT. There is nothing
-    /// useful for the app to offer here beyond saying so.
+    /// TrollStore's own **Enable JIT**, in TrollStore, before each session.
+    /// Nothing in this app can start it, and StikDebug is not an alternative:
+    /// it needs iOS 17.4, which is past every version TrollStore reaches.
+    case trollStore
+    /// AltJIT, from a connected computer. There is nothing useful for the app
+    /// to offer here beyond saying so.
     case external
 
     static var current: JITMethod {
         if touchhle_ios_jit_available() && !touchhle_ios_jit_is_from_debugger() {
             return .permanent
         }
+        // Below 17.4 nothing in-app can attach a debugger, so the user has to
+        // do it from outside; which of the two outside routes to name is what
+        // the install type decides.
         if #available(iOS 17.4, *) {
             return .stikDebug
+        }
+        if touchhle_ios_is_trollstore_install() {
+            return .trollStore
         }
         return .external
     }
 
+    /// Whether the app can start the JIT flow itself. When it cannot, the only
+    /// honest button is one that looks again after the user comes back.
+    var isSelfService: Bool {
+        self == .stikDebug
+    }
+
     /// Shown when a launch is held back because JIT is off.
     var unavailableMessage: String {
+        let preamble = "Games need JIT, and without it Applesauce closes the moment one "
+            + "starts. "
         switch self {
         case .permanent, .stikDebug:
-            return "Games need JIT, and without it Applesauce closes the moment one starts. "
-                + "Enable JIT in StikDebug, then start the game again."
+            return preamble + "Enable JIT in StikDebug, then start the game again."
+        case .trollStore:
+            return preamble + "Open TrollStore, select Applesauce, and tap Enable JIT — "
+                + "then come back here and tap Check Again."
         case .external:
-            return "Games need JIT, and without it Applesauce closes the moment one starts. "
-                + "Enable JIT for Applesauce in TrollStore, or with AltJIT, then start the "
-                + "game again."
+            return preamble + "Enable JIT with AltJIT from a connected computer, then come "
+                + "back here and tap Check Again."
         }
     }
 
@@ -1691,9 +1754,13 @@ private enum JITMethod {
             return "This install has permanent JIT, so there is nothing to enable."
         case .stikDebug:
             return "JIT must be enabled again whenever Applesauce starts as a new app process."
+        case .trollStore:
+            return "StikDebug needs iOS 17.4 or newer, which is past every version TrollStore "
+                + "reaches, so this build uses TrollStore's own Enable JIT instead. It has to "
+                + "be redone whenever Applesauce starts as a new app process."
         case .external:
-            return "StikDebug needs iOS 17.4 or newer. Enable JIT for Applesauce in TrollStore, "
-                + "or with AltJIT, each time it starts as a new app process."
+            return "StikDebug needs iOS 17.4 or newer. Enable JIT with AltJIT whenever "
+                + "Applesauce starts as a new app process."
         }
     }
 }
@@ -1703,9 +1770,10 @@ private struct EnableJITButton: View {
     @State private var showingUnavailableAlert = false
 
     var body: some View {
-        // Hidden when it cannot help: StikDebug is iOS 17.4+, and a TrollStore
-        // build with permanent JIT never needs it.
-        if JITMethod.current == .stikDebug {
+        // Hidden when it cannot help: StikDebug is iOS 17.4+, a TrollStore
+        // build enables JIT in TrollStore instead, and permanent JIT never
+        // needs it at all.
+        if JITMethod.current.isSelfService {
             button
         }
     }

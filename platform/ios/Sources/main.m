@@ -72,7 +72,7 @@ bool touchhle_ios_jit_is_from_debugger(void) {
 // SecTask lives in Security.framework but is not declared in the iOS SDK.
 // Resolve it at runtime so a missing symbol degrades to "no entitlement"
 // rather than stopping the app from launching at all.
-static bool touchhle_has_dynamic_codesigning(void) {
+static bool touchhle_has_boolean_entitlement(CFStringRef name) {
     typedef CFTypeRef (*create_from_self_fn)(CFAllocatorRef);
     typedef CFTypeRef (*copy_entitlement_fn)(CFTypeRef, CFStringRef, CFErrorRef *);
 
@@ -100,7 +100,7 @@ static bool touchhle_has_dynamic_codesigning(void) {
     if (task == NULL) {
         return false;
     }
-    CFTypeRef value = copy_entitlement(task, CFSTR("dynamic-codesigning"), NULL);
+    CFTypeRef value = copy_entitlement(task, name, NULL);
     bool granted = value != NULL
         && CFGetTypeID(value) == CFBooleanGetTypeID()
         && CFBooleanGetValue((CFBooleanRef)value);
@@ -111,8 +111,32 @@ static bool touchhle_has_dynamic_codesigning(void) {
     return granted;
 }
 
+static bool touchhle_has_dynamic_codesigning(void) {
+    return touchhle_has_boolean_entitlement(CFSTR("dynamic-codesigning"));
+}
+
 bool touchhle_ios_jit_available(void) {
     return touchhle_ios_jit_is_from_debugger() || touchhle_has_dynamic_codesigning();
+}
+
+// Which of the release IPAs this is, as far as the app can tell from inside.
+//
+// It matters because the two builds get JIT by different routes, and neither
+// route can be started from the other's UI: a sideloaded install uses
+// StikDebug's URL scheme, while a TrollStore install uses TrollStore's own
+// "Enable JIT", which nothing in this app can trigger. Offering the wrong one
+// leaves the user tapping a button that cannot work.
+//
+// The marker is an entitlement only the TrollStore IPAs carry. A free Apple
+// account cannot sign `com.apple.developer.kernel.extended-virtual-addressing`,
+// so AltStore, SideStore and Sideloadly installs never have it, and TrollStore
+// grants it unconditionally. This is a hint for choosing wording, never a
+// safety check: a paid developer account can sign it too, which is why the
+// iOS-version test for StikDebug is applied first.
+bool touchhle_ios_is_trollstore_install(void) {
+    return touchhle_has_boolean_entitlement(
+        CFSTR("com.apple.developer.kernel.extended-virtual-addressing")
+    );
 }
 
 // Do NOT add an mmap PROT_WRITE | PROT_EXEC probe here. Per mmap(2), iOS
@@ -125,11 +149,12 @@ void touchhle_ios_log_jit_status(const char *context) {
     fprintf(
         stderr,
         "touchHLE JIT [%s]: available=%d debugger=%d entitlement=%d "
-        "cs_flags=0x%08x csops=%d/%d\n",
+        "trollstore=%d cs_flags=0x%08x csops=%d/%d\n",
         context ? context : "?",
         touchhle_ios_jit_available(),
         touchhle_ios_jit_is_from_debugger(),
         touchhle_has_dynamic_codesigning(),
+        touchhle_ios_is_trollstore_install(),
         flags,
         result,
         (result == 0) ? 0 : errno
