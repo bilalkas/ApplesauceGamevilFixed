@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#import <AVFoundation/AVFoundation.h>
 #import <Foundation/Foundation.h>
 
 // Each emulator core exports this; the host passes in the one belonging to the
@@ -328,6 +329,136 @@ static void start_native_host(void) {
     ((void (*)(id, SEL))objc_msgSend)(host_class, selector);
 }
 
+// The emulator's audio comes out of OpenAL Soft, which on iOS drives a
+// RemoteIO audio unit directly. Nothing in that path ever touches
+// AVAudioSession, so up to now the app played through whatever implicit
+// session iOS hands an app that never asked for one: category SoloAmbient,
+// silenced by the ring/silent switch, stopped by the lock screen, and with an
+// I/O buffer duration the system is free to pick (and to change underneath a
+// running audio unit, which is heard as stuttering).
+//
+// Configure it explicitly, before the emulator gets a chance to open its
+// OpenAL device, so the audio unit is created against a session that is
+// already active and whose parameters no longer move.
+static const char *audio_session_error_text(NSError *error) {
+    const char *text = error.localizedDescription.UTF8String;
+    return text != NULL ? text : "(no description)";
+}
+
+// iOS can also pull the ground out from under an already-running audio unit: a
+// phone call or Siri deactivates the session, and connecting headphones or
+// AirPods changes the hardware sample rate. OpenAL Soft samples that rate
+// exactly once, in CoreAudioPlayback::reset(), and never looks again — so from
+// then on it feeds a unit whose parameters have moved, which is heard as
+// stuttering, or as audio that simply never comes back after an interruption.
+//
+// Nothing reachable from here can make OpenAL re-open its device, but
+// re-activating the session is what gets the unit running again afterwards.
+// Logging both events is what makes it possible to tell from a user's log
+// whether any of this happened at all.
+static void observe_audio_session_changes(void) {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+
+    [center addObserverForName:AVAudioSessionInterruptionNotification
+                        object:session
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+        NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
+        bool ended =
+            type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded;
+        fprintf(
+            stderr,
+            "touchHLE audio session: interruption %s\n",
+            ended ? "ended" : "began"
+        );
+        if (!ended) {
+            return;
+        }
+
+        NSError *error = nil;
+        if (![[AVAudioSession sharedInstance] setActive:YES error:&error]) {
+            fprintf(
+                stderr,
+                "touchHLE audio session: could not reactivate after an "
+                "interruption: %s\n",
+                audio_session_error_text(error)
+            );
+        }
+    }];
+
+    [center addObserverForName:AVAudioSessionRouteChangeNotification
+                        object:session
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+        NSNumber *reason = note.userInfo[AVAudioSessionRouteChangeReasonKey];
+        AVAudioSession *current = [AVAudioSession sharedInstance];
+        fprintf(
+            stderr,
+            "touchHLE audio session: route changed (reason %lu), now %g Hz, "
+            "I/O buffer=%g s, %ld output channel(s)\n",
+            (unsigned long)reason.unsignedIntegerValue,
+            current.sampleRate,
+            current.IOBufferDuration,
+            (long)current.outputNumberOfChannels
+        );
+    }];
+}
+
+static void configure_audio_session(void) {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+
+    // Launching a second game re-enters this function; the observers belong to
+    // the process, not to one game.
+    static dispatch_once_t observers_once;
+    dispatch_once(&observers_once, ^{
+        observe_audio_session_changes();
+    });
+
+    // Playback: a game's music and effects should be audible with the mute
+    // switch on, like every other iPhone game.
+    if (![session setCategory:AVAudioSessionCategoryPlayback error:&error]) {
+        fprintf(
+            stderr,
+            "touchHLE audio session: could not set the Playback category: %s\n",
+            audio_session_error_text(error)
+        );
+        error = nil;
+    }
+
+    // 23 ms is the classic 1024-frame buffer. The emulator refills OpenAL from
+    // its run loop at 60 Hz at best, so a larger buffer is worth more here than
+    // low latency; asking for a short one would only make drop-outs likelier.
+    if (![session setPreferredIOBufferDuration:0.023 error:&error]) {
+        fprintf(
+            stderr,
+            "touchHLE audio session: could not set the preferred I/O buffer "
+            "duration: %s\n",
+            audio_session_error_text(error)
+        );
+        error = nil;
+    }
+
+    if (![session setActive:YES error:&error]) {
+        fprintf(
+            stderr,
+            "touchHLE audio session: could not activate: %s\n",
+            audio_session_error_text(error)
+        );
+    }
+
+    fprintf(
+        stderr,
+        "touchHLE audio session: rate=%g Hz, I/O buffer=%g s, output "
+        "channels=%ld, other audio playing=%d\n",
+        session.sampleRate,
+        session.IOBufferDuration,
+        (long)session.outputNumberOfChannels,
+        (int)session.secondaryAudioShouldBeSilencedHint
+    );
+}
+
 int32_t touchhle_ios_launch_game(
     TouchHLEIOSRunGameFn run_game,
     const char *path,
@@ -348,6 +479,8 @@ int32_t touchhle_ios_launch_game(
         orientation_hint = "LandscapeRight";
     }
     SDL_SetHint(SDL_HINT_ORIENTATIONS, orientation_hint);
+
+    configure_audio_session();
 
     // Breadcrumbs: the emulator runs on the main thread, so if it hangs the UI
     // freezes with it and the log is the only way to see how far it got.
