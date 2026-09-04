@@ -15,10 +15,10 @@ use crate::frameworks::audio_toolbox::audio_file::{
     AudioFileID, AudioFileOpenURL, AudioFileReadPackets,
 };
 use crate::frameworks::audio_toolbox::audio_queue::{
-    kAudioQueueParam_Pan, kAudioQueueParam_Volume, AudioQueueAllocateBuffer, AudioQueueBufferRef,
-    AudioQueueDispose, AudioQueueEnqueueBuffer, AudioQueueGetParameter, AudioQueueNewOutput,
-    AudioQueueOutputCallback, AudioQueuePause, AudioQueueRef, AudioQueueSetParameter,
-    AudioQueueStart, AudioQueueStop,
+    get_audio_queue_playback_state, kAudioQueueParam_Pan, kAudioQueueParam_Volume,
+    AudioQueueAllocateBuffer, AudioQueueBufferRef, AudioQueueDispose, AudioQueueEnqueueBuffer,
+    AudioQueueGetParameter, AudioQueueNewOutput, AudioQueueOutputCallback, AudioQueuePause,
+    AudioQueueRef, AudioQueueSetParameter, AudioQueueStart, AudioQueueStop,
 };
 use crate::frameworks::carbon_core::eofErr;
 use crate::frameworks::core_audio_types::AudioStreamBasicDescription;
@@ -311,6 +311,42 @@ pub const CLASSES: ClassExports = objc_classes! {
         );
         return false;
     };
+    // `prepareToPlay` only builds a queue the first time. On every later
+    // `-play` the queue already exists, and its state decides what has to
+    // happen before starting it again.
+    if let Some(state) = get_audio_queue_playback_state(env, aq_ref) {
+        // A `current_packet` of 0 on an existing queue means the game rewound
+        // the player with `-setCurrentTime:`: priming always reads at least
+        // one packet, so the counter is only ever back at 0 on request.
+        let rewound = env.objc.borrow::<AVAudioPlayerHostObject>(this).current_packet == 0;
+        if state.is_running && state.buffers_enqueued > 0 && !rewound {
+            // The sound is still playing and nobody asked for it to start
+            // over. Real AVAudioPlayer ignores `-play` in that case, and
+            // starting the queue again would restart the OpenAL source at the
+            // head of its still-queued buffers, i.e. jump backwards by up to a
+            // buffer's worth of audio. Games that re-trigger a sound effect
+            // several times a second (Zenonia does, for hits and footsteps)
+            // hear that as stuttering.
+            return true;
+        }
+        if state.buffers_enqueued == 0 || state.is_stopping || rewound {
+            // Either playback reached the end of the audio data — which stops
+            // and thereby resets the queue, leaving `current_packet` parked at
+            // EOF, so starting the queue as-is would play silence from here on
+            // — or the game rewound the player. Both need the buffers filled
+            // from the new position, like `-prepareToPlay` does for a new
+            // queue.
+            if state.buffers_enqueued > 0 {
+                // Drop what is still queued (and finish any pending
+                // asynchronous stop) so the old audio isn't played on top of
+                // the re-filled buffers.
+                AudioQueueStop(env, aq_ref, true);
+            }
+            refill_audio_queue_buffers(env, this);
+        }
+        // Anything else is a paused queue with its buffers still enqueued:
+        // fall through to AudioQueueStart, which resumes where it left off.
+    }
     env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).is_playing = true;
     let status = AudioQueueStart(env, aq_ref, Ptr::null());
     if status != 0 {
@@ -736,6 +772,39 @@ fn derive_buffer_size(
     // Деление теперь абсолютно безопасно
     let out_num_packets_to_read = out_buffer_size / actual_max_packet_size;
     (out_buffer_size, out_num_packets_to_read)
+}
+
+/// Rewind a player whose audio queue has run empty and re-fill its buffers, so
+/// that a second `-play` restarts the sound instead of playing silence.
+///
+/// This is the tail of `-prepareToPlay`, minus the queue and buffer creation:
+/// the audio queue, its buffers and the open audio file are all still there,
+/// only the queue's contents and `current_packet` need resetting.
+fn refill_audio_queue_buffers(env: &mut Environment, this: id) {
+    let &AVAudioPlayerHostObject {
+        audio_queue,
+        audio_queue_buffers,
+        set_current_time,
+        is_playing,
+        ..
+    } = env.objc.borrow(this);
+    let (Some(aq_ref), Some(buffers)) = (audio_queue, audio_queue_buffers) else {
+        return;
+    };
+
+    // Seek back to wherever the game last asked for (0.0 unless it called
+    // `-setCurrentTime:`), exactly like `-prepareToPlay` does.
+    () = msg![env; this setCurrentTime:set_current_time];
+
+    // The buffer callback ignores calls made while the player isn't playing,
+    // so `is_playing` has to be set for the duration of the re-fill, again
+    // like `-prepareToPlay`. The caller sets the real value afterwards.
+    env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).is_playing = true;
+    for i in 0..kNumberBuffers {
+        let buffer = env.mem.read(buffers + i as u32);
+        _touchHLE_AVAudioPlayerOutputBufferHelper(env, this.cast(), aq_ref, buffer);
+    }
+    env.objc.borrow_mut::<AVAudioPlayerHostObject>(this).is_playing = is_playing;
 }
 
 fn _touchHLE_AVAudioPlayerOutputBufferHelper(

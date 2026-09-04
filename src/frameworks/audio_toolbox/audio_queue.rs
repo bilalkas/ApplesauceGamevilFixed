@@ -1404,7 +1404,6 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     let &mut AudioQueueHostObject {
         callback_proc,
         callback_user_data,
-        is_running,
         ..
     } = host_object;
 
@@ -1425,20 +1424,25 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     // The guest callback we just invoked above is allowed to call
     // AudioQueueDispose on `in_aq`. If it did, the queue is gone and there
     // is nothing left to do here.
-    if State::get(&mut env.framework_state)
-        .audio_queues
-        .get(&in_aq)
-        .is_none()
-    {
+    //
+    // The callback may also have changed the queue's state: AVAudioPlayer's
+    // callback calls AudioQueueStop once it has read the last packet of the
+    // audio file. That's why `is_running` is read here and not before the
+    // callbacks ran — a queue that has just asked to stop would otherwise
+    // still look like one that is running, and get its remaining buffers
+    // restarted from the front below, which is audible as the tail end of
+    // every sound repeating itself before it finally goes quiet.
+    let Some(host_object) = State::get(&mut env.framework_state).audio_queues.get(&in_aq) else {
         return;
-    }
+    };
+    let is_running = host_object.is_running;
 
     let context = env
         .framework_state
         .audio_toolbox
         .make_al_context_current(&mut env.openal_manager);
 
-    if is_running != AudioQueueIsRunning::Stopped {
+    if is_running == AudioQueueIsRunning::Running {
         unsafe {
             let mut al_source_state = 0;
 
@@ -1537,6 +1541,41 @@ fn notify_aq_is_running(env: &mut Environment, in_aq: AudioQueueRef) {
             &in_proc, env, (in_user_data, in_aq, kAudioQueueProperty_IsRunning)
         );
     }
+}
+
+/// Playback state of an audio queue, as observed from outside this module.
+pub struct AudioQueuePlaybackState {
+    /// How many guest buffers are currently enqueued on the queue. This drops
+    /// to zero whenever the queue is stopped or reset, which notably includes
+    /// playback running to the end of the audio data.
+    pub buffers_enqueued: usize,
+    /// Whether the queue is currently playing, i.e. not paused, not stopped
+    /// and not in the middle of an asynchronous stop.
+    pub is_running: bool,
+    /// Whether the queue has been asked to stop but hasn't finished doing so
+    /// yet, i.e. it is still playing out the buffers it has left.
+    pub is_stopping: bool,
+}
+
+/// Look up the current playback state of an audio queue. Returns [None] if the
+/// queue doesn't exist (it was never created, or it has been disposed).
+///
+/// [crate::frameworks::avfoundation::av_audio_player] needs this to tell a
+/// paused player (buffers still enqueued, resume with [AudioQueueStart]) apart
+/// from one that has played to the end (queue reset, needs to be re-filled
+/// before it can play anything again).
+pub fn get_audio_queue_playback_state(
+    env: &mut Environment,
+    in_aq: AudioQueueRef,
+) -> Option<AudioQueuePlaybackState> {
+    let host_object = State::get(&mut env.framework_state)
+        .audio_queues
+        .get(&in_aq)?;
+    Some(AudioQueuePlaybackState {
+        buffers_enqueued: host_object.buffer_queue.len(),
+        is_running: host_object.is_running == AudioQueueIsRunning::Running,
+        is_stopping: host_object.is_running == AudioQueueIsRunning::Stopping,
+    })
 }
 
 pub fn AudioQueueStart(

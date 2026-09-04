@@ -425,9 +425,63 @@ fn CFBundleCopyResourceURL(
                                           withExtension:resource_type
                                            subdirectory:sub_dir_name];
     if url == nil {
+        // Gamevil's WIPI loader retries a failed resource hundreds of times a
+        // second and never says which one, so the only trace of the miss used
+        // to be `CFReadStreamCreateWithFile`'s "no file path for URL (null)".
+        // Name it here instead — once per distinct request, since the retries
+        // would otherwise be the whole log file.
+        log_missing_resource(env, resource_name, resource_type, sub_dir_name);
         return nil;
     }
     msg![env; url copy]
+}
+
+/// Report a resource lookup that came back nil, at most once per distinct
+/// (name, type, subdirectory) triple.
+///
+/// Rate-limited the same way as the null-page warnings in [crate::mem]: a
+/// caller stuck in a retry loop asks for the same thing over and over, and one
+/// line naming it is worth more than thousands of copies of it.
+fn log_missing_resource(
+    env: &mut Environment,
+    resource_name: CFStringRef,
+    resource_type: CFStringRef,
+    sub_dir_name: CFStringRef,
+) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<HashSet<(String, String, String)>>> = Mutex::new(None);
+    const MAX_UNIQUE_LOGS: usize = 64;
+
+    fn describe(env: &mut Environment, string: CFStringRef) -> String {
+        if string == nil {
+            "<nil>".to_string()
+        } else {
+            ns_string::to_rust_string(env, string).into_owned()
+        }
+    }
+    let key = (
+        describe(env, resource_name),
+        describe(env, resource_type),
+        describe(env, sub_dir_name),
+    );
+
+    let mut guard = SEEN.lock().unwrap();
+    let seen = guard.get_or_insert_with(HashSet::new);
+    if seen.contains(&key) {
+        return;
+    }
+    if seen.len() >= MAX_UNIQUE_LOGS {
+        return;
+    }
+    log!(
+        "CFBundleCopyResourceURL: no resource named {:?} (type {:?}, subdirectory {:?}) \
+         in the bundle; returning NULL.",
+        key.0,
+        key.1,
+        key.2
+    );
+    seen.insert(key);
 }
 
 fn CFBundleCopyResourceURLInDirectory(

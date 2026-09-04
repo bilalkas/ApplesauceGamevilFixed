@@ -240,7 +240,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             return path;
         }
     }
-    nil
+    wipi_resource_fallback(env, name, extension)
 }
 
 + (id)allBundles {
@@ -706,7 +706,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             return path;
         }
     }
-    nil
+    wipi_resource_fallback(env, name, extension)
 }
 
 - (id)pathForResource:(id)name        // NSString*
@@ -978,9 +978,73 @@ pub const CLASSES: ClassExports = objc_classes! {
 // MARK: - path_for_resource_helper
 // =========================================================================
 
-// =========================================================================
-// MARK: - path_for_resource_helper
-// =========================================================================
+/// Last-resort lookup for Gamevil's WIPI `.zt1` resources: search the whole
+/// bundle for a file with this name.
+///
+/// Their WIPI-to-iOS wrapper asks for these by bare name, but the ports kept
+/// the files in subdirectories such as `com/` and `data/`, so every path
+/// `pathForResource:ofType:inDirectory:` builds misses and the lookup returns
+/// nil. `CFBundleCopyResourceURL` then hands `CFReadStreamCreateWithFile` a
+/// null URL, and the engine spins retrying the same resource rather than
+/// reporting anything — Zenonia 3 F2P hangs on its title screen that way, and
+/// Illusia 2 never gets past startup.
+///
+/// [crate::libc::posix_io] has carried the same bundle-wide search for a
+/// while; this is that fallback on the `NSBundle` side. Deliberately limited
+/// to `.zt1`, so the thousand-odd nib and image probes UIKit makes before the
+/// first frame keep their existing, stricter resolution.
+///
+/// Returns nil, like the caller would have, when this is not a `.zt1` lookup
+/// or the file really is absent.
+fn wipi_resource_fallback(env: &mut Environment, name: id, extension: id) -> id {
+    if name == nil {
+        return nil;
+    }
+
+    // The extension is spelled either way round by different callers:
+    // `pathForResource:@"light80x50.zt1" ofType:nil` and
+    // `CFBundleCopyResourceURL(…, CFSTR("light80x50"), CFSTR("zt1"), …)` mean
+    // the same file.
+    let mut file_name = ns_string::to_rust_string(env, name).into_owned();
+    if extension != nil {
+        let extension_str = ns_string::to_rust_string(env, extension).into_owned();
+        if !extension_str.is_empty() {
+            file_name = format!("{file_name}.{extension_str}");
+        }
+    }
+    if !file_name.to_ascii_lowercase().ends_with(".zt1") {
+        return nil;
+    }
+
+    // A bare name is the whole point of this fallback; anything with a
+    // directory in it has already been tried verbatim by the caller.
+    let Some(bare_name) = crate::fs::GuestPath::new(&file_name).file_name() else {
+        return nil;
+    };
+    let bundle_root = env.bundle.bundle_path().as_str().trim_end_matches('/');
+    let found = env
+        .fs
+        .find_file_by_name(crate::fs::GuestPath::new(bundle_root), bare_name)
+        .map(String::from);
+
+    let Some(found) = found else {
+        // Debug-only: a guest stuck retrying a resource asks for it hundreds of
+        // times a second, and `CFBundleCopyResourceURL` already names each
+        // distinct miss once.
+        log_dbg!(
+            "NSBundle: WIPI resource {:?} is not anywhere in the bundle, returning nil",
+            file_name
+        );
+        return nil;
+    };
+    log!(
+        "NSBundle: found WIPI resource {:?} at {:?} by searching the bundle",
+        file_name,
+        found
+    );
+    let found = ns_string::from_rust_string(env, found);
+    autorelease(env, found)
+}
 
 fn path_for_resource_helper(
     env: &mut Environment,

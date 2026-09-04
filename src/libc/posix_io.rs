@@ -193,6 +193,45 @@ struct iovec {
 }
 unsafe impl SafeRead for iovec {}
 
+/// Note that a guest just opened a directory as if it were a file, at most
+/// once per distinct path.
+///
+/// This is faithful POSIX — `open()` on a directory succeeds and it is the
+/// `read()` that fails with `EISDIR` — but a guest doing it has almost always
+/// built the path wrong, and the `EISDIR` on its own gives no way to tell
+/// which path it was: the failing `read()` only knows a file descriptor, and
+/// the successful `open()` that produced it is not otherwise logged.
+fn warn_directory_opened(path: &str) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    const MAX_UNIQUE_LOGS: usize = 16;
+
+    let mut guard = SEEN.lock().unwrap();
+    let seen = guard.get_or_insert_with(HashSet::new);
+    if seen.contains(path) || seen.len() >= MAX_UNIQUE_LOGS {
+        return;
+    }
+    seen.insert(path.to_string());
+    log!(
+        "Warning: open({:?}) opened a directory; reads from this fd will fail with EISDIR.",
+        path
+    );
+}
+
+/// Whether `fd` refers to a directory that was opened as if it were a file.
+///
+/// POSIX lets `open()` succeed on a directory and fails the `read()` instead,
+/// so a caller that only ever wants file contents — [crate::frameworks::
+/// core_foundation::cf_stream], say — has no way to notice until it is already
+/// in a read loop that can never succeed.
+pub fn is_directory_fd(env: &mut Environment, fd: FileDescriptor) -> bool {
+    match env.libc_state.posix_io.file_for_fd(fd) {
+        Some(file) => matches!(file.file, GuestFile::Directory),
+        None => false,
+    }
+}
+
 fn open(env: &mut Environment, path: ConstPtr<u8>, flags: i32, _args: DotDotDot) -> FileDescriptor {
     set_errno(env, 0);
     self::open_direct(env, path, flags)
@@ -386,6 +425,9 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
         .open_with_options(GuestPath::new(&actual_path_string), options)
     {
         Ok(file) => {
+            if matches!(file, GuestFile::Directory) {
+                warn_directory_opened(&actual_path_string);
+            }
             let host_object = PosixFileHostObject {
                 file,
                 needs_flush,

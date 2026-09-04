@@ -297,6 +297,12 @@ struct CFReadStreamHostObject {
     /// Live file descriptor, between `CFReadStreamOpen` and
     /// `CFReadStreamClose`/dealloc. Only ever set for file streams.
     fd: Option<posix_io::FileDescriptor>,
+    /// Whether this stream came from [CFReadStreamCreateWithFile], even if no
+    /// path could be taken from the URL. Streams made from bytes or a socket
+    /// have nothing to open and are "open" on request; a file stream with no
+    /// file must fail instead, or the caller waits forever for bytes that
+    /// cannot arrive.
+    is_file_stream: bool,
 }
 impl HostObject for CFReadStreamHostObject {}
 
@@ -344,6 +350,7 @@ fn alloc_read_stream(env: &mut Environment) -> CFReadStreamRef {
             data: Vec::new(),
             file_path: None,
             fd: None,
+            is_file_stream: false,
         }),
         &mut env.mem,
     )
@@ -419,7 +426,11 @@ fn CFReadStreamCreateWithFile(
         }
     };
     if path.is_none() {
-        log!(
+        // Only once: a guest that gets a null URL here is being handed one by
+        // a failed `CFBundleCopyResourceURL`, and Gamevil's WIPI loader retries
+        // that hundreds of times a second. `CFBundleCopyResourceURL` names the
+        // resource it could not find, which is the part worth reading.
+        log_once!(
             "CFReadStreamCreateWithFile: no file path for URL {:?}; \
              the stream will fail to open.",
             file_url
@@ -427,9 +438,9 @@ fn CFReadStreamCreateWithFile(
     }
     log_dbg!("CFReadStreamCreateWithFile({:?})", path);
     let stream = alloc_read_stream(env);
-    env.objc
-        .borrow_mut::<CFReadStreamHostObject>(stream)
-        .file_path = path;
+    let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
+    host.file_path = path;
+    host.is_file_stream = true;
     stream
 }
 
@@ -524,12 +535,31 @@ fn CFReadStreamOpen(env: &mut Environment, stream: CFReadStreamRef) -> bool {
     if stream.is_null() {
         return false;
     }
-    let (file_path, already_open) = {
+    let (file_path, already_open, is_file_stream) = {
         let host = env.objc.borrow::<CFReadStreamHostObject>(stream);
-        (host.file_path.clone(), host.fd.is_some())
+        (
+            host.file_path.clone(),
+            host.fd.is_some(),
+            host.is_file_stream,
+        )
     };
     let Some(file_path) = file_path else {
         let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
+        if is_file_stream {
+            // Made from a URL that had no usable path, so there is no file to
+            // open. Reporting success here gives the caller a stream that is
+            // "open" and will never yield a byte: Gamevil's WIPI loader spins
+            // on exactly that, hundreds of times a second, instead of taking
+            // the error path it already has for a stream that fails to open.
+            log_once!(
+                "CFReadStreamOpen: stream has no file behind it (the URL had no \
+                 path); reporting failure so the caller can give up."
+            );
+            host.status = kCFStreamStatusError;
+            return false;
+        }
+        // Streams made from bytes or a socket have nothing to open, and are
+        // open as soon as they are asked to be.
         host.status = kCFStreamStatusOpen;
         host.offset = 0;
         return true;
@@ -541,6 +571,18 @@ fn CFReadStreamOpen(env: &mut Environment, stream: CFReadStreamRef) -> bool {
     let path_cstr = env.mem.alloc_and_write_cstr(file_path.as_bytes());
     let fd = posix_io::open_direct(env, path_cstr.cast_const(), posix_io::O_RDONLY);
     env.mem.free(path_cstr.cast());
+    if fd != -1 && posix_io::is_directory_fd(env, fd) {
+        // `open()` on a directory succeeds — it is the `read()` that fails
+        // with EISDIR — so without this check the stream reports itself open
+        // and then fails every single read, forever.
+        log!(
+            "CFReadStreamOpen: {:?} is a directory, not a file; reporting failure.",
+            file_path
+        );
+        posix_io::close(env, fd);
+        env.objc.borrow_mut::<CFReadStreamHostObject>(stream).status = kCFStreamStatusError;
+        return false;
+    }
     let host = env.objc.borrow_mut::<CFReadStreamHostObject>(stream);
     if fd == -1 {
         log!("CFReadStreamOpen: could not open {:?}", file_path);
