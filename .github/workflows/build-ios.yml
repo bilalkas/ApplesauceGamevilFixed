@@ -40,8 +40,10 @@ jobs:
           path: touchhle-core-repo
           submodules: recursive
 
-      # Siehe platform/ios/patches/oaknut-code_block.hpp: ohne diesen Patch
-      # bekommt nur StikDebug JIT, und TrollStore/AltJIT stirbt beim Spielstart.
+      # Siehe platform/ios/scripts/patch-oaknut.sh: ohne diesen Patch bekommt
+      # HyperHLE nur mit StikDebug JIT, und TrollStore/AltJIT stirbt beim
+      # Spielstart. Der touchHLE-Core nutzt ein anderes dynarmic und wird
+      # erkannt und übersprungen.
       - name: Patch oaknut for TrollStore and AltJIT
         run: |
           sh platform/ios/scripts/patch-oaknut.sh \

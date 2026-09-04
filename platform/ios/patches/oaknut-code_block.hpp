@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 // Applesauce: this is oaknut's code_block.hpp with an iOS fallback added. It
-// replaces the copy inside both dynarmic checkouts at build time; see
+// replaces the copy inside HyperHLE's dynarmic checkout at build time; see
 // platform/ios/scripts/patch-oaknut.sh for why it is a whole file rather than
-// a commit.
+// a commit, and why the touchHLE core's dynarmic must NOT get it.
 //
 // The fork this project builds against reaches JIT memory through a "JIT
 // server": prepare_jit_region() below executes `brk #0xf00d`, a breakpoint an
