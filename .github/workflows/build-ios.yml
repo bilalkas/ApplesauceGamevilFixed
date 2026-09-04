@@ -40,6 +40,14 @@ jobs:
           path: touchhle-core-repo
           submodules: recursive
 
+      # Siehe platform/ios/patches/oaknut-code_block.hpp: ohne diesen Patch
+      # bekommt nur StikDebug JIT, und TrollStore/AltJIT stirbt beim Spielstart.
+      - name: Patch oaknut for TrollStore and AltJIT
+        run: |
+          sh platform/ios/scripts/patch-oaknut.sh \
+            vendor/dynarmic \
+            touchhle-core-repo/vendor/dynarmic
+
       # Baut Applesauce und nutzt die Variable, um BEIDE Cores (HyperHLE & touchHLE) einzubinden
       - name: Build Applesauce
         env:

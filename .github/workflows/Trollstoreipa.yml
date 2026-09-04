@@ -39,6 +39,18 @@ jobs:
           path: touchhle-core-repo
           submodules: recursive
 
+      # Both cores build their own dynarmic, and dynarmic's oaknut reaches JIT
+      # memory through a debugger that answers `brk #0xf00d`. StikDebug does;
+      # TrollStore's "Enable JIT" does not -- it sets CS_DEBUGGED and detaches,
+      # so the breakpoint arrives as an unhandled SIGTRAP and the process dies
+      # the moment a game starts. This adds the mmap fallback that route needs.
+      # See platform/ios/patches/oaknut-code_block.hpp.
+      - name: Patch oaknut for TrollStore and AltJIT
+        run: |
+          sh platform/ios/scripts/patch-oaknut.sh \
+            vendor/dynarmic \
+            touchhle-core-repo/vendor/dynarmic
+
       - name: Build Applesauce
         env:
           TOUCHHLE_CORE_REPO: ${{ github.workspace }}/touchhle-core-repo

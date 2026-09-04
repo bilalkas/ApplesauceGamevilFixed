@@ -5,6 +5,8 @@
  */
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <exception>
 
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/interface/A32/config.h"
@@ -319,7 +321,22 @@ extern "C" {
 
 DynarmicWrapper *touchHLE_DynarmicWrapper_new(void *direct_memory_access_ptr,
                                               size_t null_page_count) {
-  return new DynarmicWrapper(direct_memory_access_ptr, null_page_count);
+  // Constructing the Jit is what allocates the executable memory, so on iOS
+  // this is the exact point at which "JIT was never enabled" is discovered —
+  // and it happens when a game starts, not when the app does. Letting the
+  // exception cross back into Rust would end the process through
+  // std::terminate with nothing in the log, which is indistinguishable from
+  // the game closing by itself.
+  try {
+    return new DynarmicWrapper(direct_memory_access_ptr, null_page_count);
+  } catch (const std::exception &error) {
+    fprintf(stderr,
+            "touchHLE: the CPU emulator could not get executable memory (%s).\n"
+            "          JIT is not enabled for this process. Enable it and "
+            "start the game again.\n",
+            error.what());
+    std::abort();
+  }
 }
 void touchHLE_DynarmicWrapper_delete(DynarmicWrapper *cpu) { delete cpu; }
 
