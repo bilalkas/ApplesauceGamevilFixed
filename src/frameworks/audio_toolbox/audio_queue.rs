@@ -74,10 +74,11 @@ struct Diagnostics {
     /// That means the source ran dry before we got around to feeding it, which
     /// is exactly what a drop-out sounds like.
     underruns: u32,
-    /// Longest interval between two consecutive services of one and the same
-    /// queue during this window. Audio queues are only serviced from the run
-    /// loop, so this measures how long the emulator went without running it.
-    worst_gap: Duration,
+    /// How many OpenAL buffers the worst of those drop-outs still had queued.
+    /// Zero means the source had played everything we ever gave it; a non-zero
+    /// value means OpenAL stopped with audio still in hand, which is a very
+    /// different fault and worth telling apart in a user's log.
+    buffers_left: ALint,
 }
 
 struct AudioQueueHostObject {
@@ -111,9 +112,9 @@ struct AudioQueueHostObject {
     /// in offline-rendering mode and the caller is expected to drive playback
     /// via `AudioQueueOfflineRender`.
     offline_render_format: Option<AudioStreamBasicDescription>,
-    /// When [handle_audio_queue] last ran for this queue. Only used for the
-    /// drop-out diagnostics in [Diagnostics].
-    last_serviced: Option<Instant>,
+    /// Whether this queue's OpenAL source was still playing at the end of the
+    /// previous pass. Only used for the drop-out diagnostics in [Diagnostics].
+    was_playing: bool,
 }
 
 /// Track whether the audio queue is meant to be running, in order to handle
@@ -270,7 +271,7 @@ pub fn AudioQueueNewOutput(
         input_delay: 0,
         hardware_codec_policy: codec_policy::DEFAULT,
         offline_render_format: None,
-        last_serviced: None,
+        was_playing: false,
     };
 
     let aq_ref = env.mem.alloc_and_write(OpaqueAudioQueue { _filler: 0 });
@@ -1411,11 +1412,12 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
 
     host_object.is_running_handler = true;
 
-    // How long this queue went unserviced. The run loop calls us once per
-    // iteration for every queue, so anything much above a 60th of a second
-    // means the emulator itself stalled.
+    // Whether this queue's source was still playing when we last looked. A
+    // source that is found stopped is only a drop-out if it *was* playing;
+    // one the game has just re-triggered after a pause is expected to be
+    // stopped, and counting that would report a fault for every sound effect.
+    let was_playing = host_object.was_playing;
     let now = Instant::now();
-    let gap = host_object.last_serviced.replace(now).map(|prev| now - prev);
 
     let mut buffers_to_reuse = Vec::new();
 
@@ -1483,6 +1485,8 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
         .make_al_context_current(&mut env.openal_manager);
 
     let mut underran = false;
+    let mut buffers_left = 0;
+    let mut now_playing = false;
     if is_running == AudioQueueIsRunning::Running {
         unsafe {
             let mut al_source_state = 0;
@@ -1490,10 +1494,20 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
             context.GetSourcei(al_source, al::AL_SOURCE_STATE, &mut al_source_state);
             assert!(context.GetError() == 0);
             if al_source_state == al::AL_STOPPED {
+                // How much audio OpenAL still had when it stopped. If this is
+                // zero the source simply reached the end of everything we fed
+                // it — late refills. If it is not, OpenAL gave up on audio it
+                // was already holding, which is a different fault entirely.
+                context.GetSourcei(al_source, al::AL_BUFFERS_QUEUED, &mut buffers_left);
+                assert!(context.GetError() == 0);
+
                 context.SourcePlay(al_source);
-                underran = has_data_left;
+                underran = has_data_left && was_playing;
                 log_dbg!("Restarted OpenAL source for queue {:?}", in_aq);
             }
+            // After the restart above the source is playing again, so as far as
+            // the next pass is concerned this queue was live either way.
+            now_playing = al_source_state == al::AL_PLAYING || has_data_left;
         }
     }
 
@@ -1519,6 +1533,7 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
 
     if let Some(host_object) = state.audio_queues.get_mut(&in_aq) {
         host_object.is_running_handler = false;
+        host_object.was_playing = now_playing;
     }
 
     // Fold this pass into the current reporting window, and once a second
@@ -1528,21 +1543,19 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     let window_start = *diagnostics.window_start.get_or_insert(now);
     if underran {
         diagnostics.underruns += 1;
-    }
-    if let Some(gap) = gap {
-        diagnostics.worst_gap = diagnostics.worst_gap.max(gap);
+        diagnostics.buffers_left = diagnostics.buffers_left.max(buffers_left);
     }
     let elapsed = now.duration_since(window_start);
     if elapsed < Duration::from_secs(1) {
         return;
     }
     let underruns = diagnostics.underruns;
-    let worst_gap = diagnostics.worst_gap;
+    let buffers_left = diagnostics.buffers_left;
     diagnostics.underruns = 0;
-    diagnostics.worst_gap = Duration::ZERO;
+    diagnostics.buffers_left = 0;
     diagnostics.window_start = Some(now);
 
-    if underruns == 0 && worst_gap < Duration::from_millis(250) {
+    if underruns == 0 {
         return;
     }
     let playing = state
@@ -1552,11 +1565,11 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
         .count();
     log!(
         "Warning: audio playback is not keeping up: {} drop-out(s) in the last \
-         {:.1} s, longest time a queue went unserviced {} ms, {} of {} queues \
-         playing.",
+         {:.1} s, up to {} OpenAL buffer(s) still queued when a source ran dry, \
+         {} of {} queues playing.",
         underruns,
         elapsed.as_secs_f32(),
-        worst_gap.as_millis(),
+        buffers_left,
         playing,
         state.audio_queues.len()
     );
@@ -1970,7 +1983,7 @@ pub fn AudioQueueNewInput(
         input_delay: 0,
         hardware_codec_policy: codec_policy::DEFAULT,
         offline_render_format: None,
-        last_serviced: None,
+        was_playing: false,
     };
 
     let aq_ref = env.mem.alloc_and_write(OpaqueAudioQueue { _filler: 0 });
